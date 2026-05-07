@@ -100,6 +100,23 @@ When a webhook arrives from an unlisted repository:
 
 If `repos` is not configured or empty, all repositories are allowed.
 
+## PR Checks Gate
+
+By default, SchemaBot blocks `apply` and `apply-confirm` when non-SchemaBot PR checks are failing. This prevents applying schema changes on a PR with broken CI, linters, or security scans.
+
+```yaml
+# Block apply when PR checks are failing (default: true)
+require_passing_checks: true
+```
+
+A check is considered "failing" if its status is `completed` and its conclusion is `failure`, `error`, or `timed_out`. Checks that are still running (`in_progress`, `queued`) do not block apply. Checks with conclusion `neutral` or `skipped` are ignored. SchemaBot's own checks (names starting with "SchemaBot") are always excluded.
+
+When checks are failing, SchemaBot posts a comment listing the failing checks and instructs the user to fix them before retrying.
+
+If the GitHub API is unreachable when checking statuses, SchemaBot logs a warning and allows the apply to proceed (graceful degradation).
+
+Set `require_passing_checks: false` to disable this gate.
+
 ## Multi-Environment Deployment
 
 For organizations that need isolated infrastructure per environment (e.g., separate staging and production deployments with their own GitHub Apps and databases), SchemaBot supports scoping each instance to a subset of environments using `allowed_environments`.

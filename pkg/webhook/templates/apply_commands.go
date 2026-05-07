@@ -231,6 +231,31 @@ func RenderApplyBlockedByPriorEnv(database, environment, priorEnv, status, actio
 	return sb.String()
 }
 
+// FailingCheck represents a PR check that is blocking apply.
+type FailingCheck struct {
+	Name       string
+	Conclusion string // "failure", "error", "timed_out"
+}
+
+// RenderApplyBlockedByFailingChecks renders a comment when apply is blocked
+// because non-SchemaBot PR checks are failing.
+func RenderApplyBlockedByFailingChecks(environment string, failing []FailingCheck) string {
+	var sb strings.Builder
+
+	sb.WriteString("## ❌ Apply Blocked\n\n")
+	fmt.Fprintf(&sb, "**Environment**: `%s`\n\n", environment)
+	sb.WriteString("Cannot apply while PR checks are failing:\n\n")
+	sb.WriteString("| Check | Status |\n")
+	sb.WriteString("|-------|--------|\n")
+	for _, f := range failing {
+		fmt.Fprintf(&sb, "| `%s` | %s |\n", f.Name, f.Conclusion)
+	}
+	sb.WriteString("\nFix the failing checks and retry:\n")
+	fmt.Fprintf(&sb, "```\nschemabot apply -e %s\n```\n", environment)
+
+	return sb.String()
+}
+
 // RenderApplyBlockedByPriorEnvInProgress renders a comment when an apply is blocked
 // because a prior environment's apply is currently running.
 func RenderApplyBlockedByPriorEnvInProgress(database, environment, priorEnv string) string {

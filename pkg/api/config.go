@@ -43,6 +43,15 @@ type ServerConfig struct {
 	// When empty or nil, all environments are allowed (backwards compatible).
 	AllowedEnvironments []string `yaml:"allowed_environments"`
 
+	// RequirePassingChecks blocks apply when non-SchemaBot PR checks are failing.
+	// When enabled (default), SchemaBot verifies that all other checks (CI, linters,
+	// security scans) have passed before executing a schema change. Checks with
+	// conclusion "neutral" or "skipped" are ignored. SchemaBot's own checks are
+	// excluded from the evaluation.
+	//
+	// Defaults to true when not configured (nil = enabled).
+	RequirePassingChecks *bool `yaml:"require_passing_checks"`
+
 	// RespondToUnscoped controls whether this instance responds to commands
 	// that are not scoped to a specific environment. In multi-instance
 	// deployments where each repo has multiple GitHub Apps installed, set
@@ -334,6 +343,15 @@ func (c *ServerConfig) ShouldRespondToUnscoped() bool {
 		return true
 	}
 	return *c.RespondToUnscoped
+}
+
+// ShouldRequirePassingChecks returns whether apply should be blocked when
+// non-SchemaBot PR checks are failing. Defaults to true when not configured.
+func (c *ServerConfig) ShouldRequirePassingChecks() bool {
+	if c == nil || c.RequirePassingChecks == nil {
+		return true
+	}
+	return *c.RequirePassingChecks
 }
 
 // StorageDSN returns the resolved storage DSN.

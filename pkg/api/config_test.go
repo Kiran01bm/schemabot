@@ -484,6 +484,46 @@ allowed_environments:
 	})
 }
 
+func TestServerConfig_ShouldRequirePassingChecks(t *testing.T) {
+	t.Run("nil receiver defaults to true", func(t *testing.T) {
+		var cfg *ServerConfig
+		assert.True(t, cfg.ShouldRequirePassingChecks())
+	})
+
+	t.Run("nil field defaults to true", func(t *testing.T) {
+		cfg := &ServerConfig{}
+		assert.True(t, cfg.ShouldRequirePassingChecks())
+	})
+
+	t.Run("explicitly true", func(t *testing.T) {
+		cfg := &ServerConfig{RequirePassingChecks: new(true)}
+		assert.True(t, cfg.ShouldRequirePassingChecks())
+	})
+
+	t.Run("explicitly false", func(t *testing.T) {
+		cfg := &ServerConfig{RequirePassingChecks: new(false)}
+		assert.False(t, cfg.ShouldRequirePassingChecks())
+	})
+
+	t.Run("YAML deserialization", func(t *testing.T) {
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "config.yaml")
+		content := `
+tern_deployments:
+  default:
+    staging: "localhost:9090"
+require_passing_checks: false
+`
+		err := os.WriteFile(configPath, []byte(content), 0644)
+		require.NoError(t, err)
+
+		cfg, err := LoadServerConfigFromFile(configPath)
+		require.NoError(t, err)
+
+		assert.False(t, cfg.ShouldRequirePassingChecks())
+	})
+}
+
 func TestGitHubConfig_ResolveWebhookSecret(t *testing.T) {
 	t.Run("resolves direct value", func(t *testing.T) {
 		g := GitHubConfig{WebhookSecret: "my-secret"}

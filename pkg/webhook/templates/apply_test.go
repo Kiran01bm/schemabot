@@ -317,6 +317,35 @@ func TestPreviewCommentSummaryStopped(t *testing.T) {
 	assert.Contains(t, result, "**`orders`**")
 }
 
+func TestRenderApplyBlockedByFailingChecks(t *testing.T) {
+	failing := []FailingCheck{
+		{Name: "CI / unit-tests", Conclusion: "failure"},
+		{Name: "CI / lint", Conclusion: "timed_out"},
+	}
+
+	result := RenderApplyBlockedByFailingChecks("staging", failing)
+
+	assert.Contains(t, result, "## ❌ Apply Blocked")
+	assert.Contains(t, result, "`staging`")
+	assert.Contains(t, result, "Cannot apply while PR checks are failing")
+	assert.Contains(t, result, "| Check | Status |")
+	assert.Contains(t, result, "| `CI / unit-tests` | failure |")
+	assert.Contains(t, result, "| `CI / lint` | timed_out |")
+	assert.Contains(t, result, "schemabot apply -e staging")
+}
+
+func TestRenderApplyBlockedByFailingChecks_SingleCheck(t *testing.T) {
+	failing := []FailingCheck{
+		{Name: "security-scan", Conclusion: "error"},
+	}
+
+	result := RenderApplyBlockedByFailingChecks("production", failing)
+
+	assert.Contains(t, result, "`production`")
+	assert.Contains(t, result, "| `security-scan` | error |")
+	assert.Contains(t, result, "schemabot apply -e production")
+}
+
 func TestTruncateDDL(t *testing.T) {
 	assert.Equal(t, "ALTER TABLE orders ADD INDEX idx_user_id (user_id)", truncateDDL("ALTER TABLE `orders` ADD INDEX `idx_user_id` (`user_id`)", 80))
 	assert.Equal(t, "short", truncateDDL("short", 80))

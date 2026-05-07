@@ -39,6 +39,22 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		return
 	}
 
+	// Tier 2: PR checks gate — block if non-SchemaBot checks are failing
+	prInfo, err := client.FetchPullRequest(ctx, repo, pr)
+	if err != nil {
+		h.logger.Error("failed to fetch PR for checks gate", "error", err)
+		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
+			RequestedBy: requestedBy,
+			Environment: environment,
+			CommandName: action.Apply,
+			ErrorDetail: "Failed to fetch PR info: " + err.Error(),
+		}))
+		return
+	}
+	if blocked := h.enforcePassingChecks(ctx, client, repo, pr, installationID, prInfo.HeadSHA, environment); blocked {
+		return
+	}
+
 	database := schemaResult.Database
 	dbType := schemaResult.Type
 	lockOwner := fmt.Sprintf("%s#%d", repo, pr)
@@ -272,6 +288,22 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 		return
 	}
 
+	// Tier 2: PR checks gate — re-check on confirm to prevent bypass
+	confirmPRInfo, err := client.FetchPullRequest(ctx, repo, pr)
+	if err != nil {
+		h.logger.Error("failed to fetch PR for checks gate", "error", err)
+		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
+			RequestedBy: requestedBy,
+			Environment: environment,
+			CommandName: action.ApplyConfirm,
+			ErrorDetail: "Failed to fetch PR info: " + err.Error(),
+		}))
+		return
+	}
+	if blocked := h.enforcePassingChecks(ctx, client, repo, pr, installationID, confirmPRInfo.HeadSHA, environment); blocked {
+		return
+	}
+
 	database := schemaResult.Database
 	dbType := schemaResult.Type
 	lockOwner := fmt.Sprintf("%s#%d", repo, pr)
@@ -494,6 +526,59 @@ func ddlMatchesStoredPlan(planResp *apitypes.PlanResponse, storedPlan *storage.P
 		storedSet[n.DDL]--
 	}
 	return true
+}
+
+// filterFailingNonSchemaBotChecks returns checks that are failing, excluding
+// SchemaBot's own checks and checks with conclusion "neutral", "skipped", or "success".
+// Only checks with completed status and conclusion "failure", "error", or "timed_out"
+// are considered failing.
+func filterFailingNonSchemaBotChecks(statuses []ghclient.PRCheckStatus) []templates.FailingCheck {
+	var failing []templates.FailingCheck
+	for _, s := range statuses {
+		if s.IsSchemaBot {
+			continue
+		}
+		if s.Status != "completed" {
+			continue
+		}
+		switch s.Conclusion {
+		case "failure", "error", "timed_out":
+			failing = append(failing, templates.FailingCheck{
+				Name:       s.Name,
+				Conclusion: s.Conclusion,
+			})
+		}
+	}
+	return failing
+}
+
+// enforcePassingChecks verifies that all non-SchemaBot PR checks are passing.
+// Returns true if apply was blocked (caller should return), false if it may proceed.
+func (h *Handler) enforcePassingChecks(ctx context.Context, client *ghclient.InstallationClient, repo string, pr int, installationID int64, headSHA, environment string) bool {
+	if !h.service.Config().ShouldRequirePassingChecks() {
+		h.logger.Debug("passing checks gate disabled", "repo", repo, "pr", pr)
+		return false
+	}
+
+	statuses, err := client.GetPRCheckStatuses(ctx, repo, headSHA)
+	if err != nil {
+		// Graceful degradation: log the error but allow the apply to proceed.
+		// Blocking applies when the GitHub API is unreachable would be too disruptive.
+		h.logger.Warn("failed to fetch PR check statuses, skipping checks gate", "repo", repo, "pr", pr, "error", err)
+		return false
+	}
+
+	failing := filterFailingNonSchemaBotChecks(statuses)
+	if len(failing) > 0 {
+		h.logger.Info("apply blocked by failing PR checks",
+			"repo", repo, "pr", pr, "environment", environment,
+			"failing_count", len(failing))
+		h.postComment(repo, pr, installationID,
+			templates.RenderApplyBlockedByFailingChecks(environment, failing))
+		return true
+	}
+
+	return false
 }
 
 // handleUnlockCommand handles the "schemabot unlock" PR comment command.
