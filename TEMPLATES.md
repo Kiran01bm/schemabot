@@ -2030,7 +2030,7 @@ ALTER TABLE `users` ADD INDEX `idx_email`(`email`);
 ALTER TABLE `products` ADD INDEX `idx_price`(`price_cents`);
 ```
 
-*Apply ID: `apply-a1b2c3d4e5f6`*
+_Apply ID: apply-a1b2c3d4e5f6_
 
 </details>
 
@@ -2165,7 +2165,7 @@ ALTER TABLE `notifications` ADD INDEX `idx_user_status`(`user_id`, `status`);
 ```
 
 </details>
-*Apply ID: `apply-a1b2c3d4e5f6`*
+_Apply ID: apply-a1b2c3d4e5f6_
 
 </details>
 
@@ -2335,7 +2335,7 @@ ALTER TABLE `addresses` ADD INDEX `idx_zip`(`zip_code`);
 ALTER TABLE `events` ADD INDEX `idx_created_at`(`created_at`);
 ```
 
-*Apply ID: `apply-a1b2c3d4e5f6`*
+_Apply ID: apply-a1b2c3d4e5f6_
 </details>
 
 ### CLI Output
@@ -4166,6 +4166,7 @@ schemabot apply -e staging
 ```
 
 </details>
+
 ## Sequential Mode (CLI)
 
 <details>
@@ -4397,6 +4398,7 @@ Use 'schemabot start' to resume from checkpoint.
 ```
 </details>
 
+
 ## Defer Cutover (CLI)
 
 <details>
@@ -4608,6 +4610,7 @@ Cutover in progress. This typically completes within seconds.
 Tables are being renamed atomically...
 ```
 </details>
+
 
 ## Lint & Unsafe (CLI)
 

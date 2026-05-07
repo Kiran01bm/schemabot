@@ -434,7 +434,7 @@ func writeSummaryCompleted(sb *strings.Builder, data ApplyStatusCommentData, tot
 	writeSuccessBlock(sb, msg)
 	writeSummaryTableList(sb, data)
 	if data.ApplyID != "" {
-		fmt.Fprintf(sb, "*Apply ID: `%s`*\n", data.ApplyID)
+		fmt.Fprintf(sb, "_Apply ID: %s_\n", data.ApplyID)
 	}
 }
 

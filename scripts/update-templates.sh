@@ -117,6 +117,7 @@ render_cli_section() {
     local heading="$1"
     local preview_type="$2"
 
+    echo "" >> "$SNAPSHOT"
     echo "## ${heading}" >> "$SNAPSHOT"
     echo "" >> "$SNAPSHOT"
     "$BINARY" preview "$preview_type" 2>&1 | strip_ansi | wrap_sections 1 >> "$SNAPSHOT"

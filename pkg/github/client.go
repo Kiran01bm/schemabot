@@ -356,7 +356,7 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 		if resp.NextPage == 0 {
 			break
 		}
-		checkOpts.ListOptions.Page = resp.NextPage
+		checkOpts.Page = resp.NextPage
 	}
 
 	// Fetch commit statuses (legacy Status API). The API returns statuses
