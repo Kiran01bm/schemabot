@@ -154,6 +154,8 @@ const (
 	PreviewCommentBlockedByPriorInProg PreviewType = "comment_blocked_prior_env_inprogress" // Blocked by staging (in progress)
 	PreviewCommentReviewRequired       PreviewType = "comment_review_required"              // Review gate: CODEOWNERS approval needed
 	PreviewCommentReviewGateError      PreviewType = "comment_review_gate_error"            // Review gate: fail-closed error
+	PreviewCommentChecksGateFailing    PreviewType = "comment_checks_gate_failing"          // Checks gate: failing CI/lint
+	PreviewCommentChecksGateInProgress PreviewType = "comment_checks_gate_in_progress"      // Checks gate: CI still running
 	PreviewCommentApplyAllType         PreviewType = "comment_apply_all"                    // Show all apply comment previews
 )
 
@@ -348,6 +350,16 @@ func PreviewCLIOutput(previewType PreviewType) {
 		fmt.Print(webhooktemplates.PreviewCommentReviewRequired())
 	case PreviewCommentReviewGateError:
 		fmt.Print(webhooktemplates.PreviewCommentReviewGateError())
+	case PreviewCommentChecksGateFailing:
+		fmt.Print(webhooktemplates.RenderApplyBlockedByFailingChecks("staging", []webhooktemplates.FailingCheck{
+			{Name: "CI / unit-tests", Conclusion: "failure"},
+			{Name: "CI / lint", Conclusion: "timed_out"},
+		}))
+	case PreviewCommentChecksGateInProgress:
+		fmt.Print(webhooktemplates.RenderApplyBlockedByInProgressChecks("staging", []webhooktemplates.FailingCheck{
+			{Name: "CI / unit-tests", Conclusion: "in_progress"},
+			{Name: "CI / integration-tests", Conclusion: "queued"},
+		}))
 	case PreviewCommentApplyAllType:
 		previewApplyCommandAllOutput()
 	// Paired aggregate previews (PR + CLI subsections)
@@ -944,6 +956,18 @@ func previewApplyCommandAllOutput() {
 		{"BLOCKED BY PRIOR ENV (IN PROGRESS)", func() { fmt.Print(webhooktemplates.PreviewCommentApplyBlockedByPriorEnvInProgress()) }},
 		{"REVIEW REQUIRED (CODEOWNERS)", func() { fmt.Print(webhooktemplates.PreviewCommentReviewRequired()) }},
 		{"REVIEW GATE ERROR (FAIL-CLOSED)", func() { fmt.Print(webhooktemplates.PreviewCommentReviewGateError()) }},
+		{"CHECKS GATE: FAILING", func() {
+			fmt.Print(webhooktemplates.RenderApplyBlockedByFailingChecks("staging", []webhooktemplates.FailingCheck{
+				{Name: "CI / unit-tests", Conclusion: "failure"},
+				{Name: "CI / lint", Conclusion: "timed_out"},
+			}))
+		}},
+		{"CHECKS GATE: IN PROGRESS", func() {
+			fmt.Print(webhooktemplates.RenderApplyBlockedByInProgressChecks("staging", []webhooktemplates.FailingCheck{
+				{Name: "CI / unit-tests", Conclusion: "in_progress"},
+				{Name: "CI / integration-tests", Conclusion: "queued"},
+			}))
+		}},
 	}
 
 	for i, s := range sections {

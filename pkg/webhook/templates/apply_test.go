@@ -346,6 +346,23 @@ func TestRenderApplyBlockedByFailingChecks_SingleCheck(t *testing.T) {
 	assert.Contains(t, result, "schemabot apply -e production")
 }
 
+func TestRenderApplyBlockedByInProgressChecks(t *testing.T) {
+	inProgress := []FailingCheck{
+		{Name: "CI / unit-tests", Conclusion: "in_progress"},
+		{Name: "CI / integration", Conclusion: "queued"},
+	}
+
+	result := RenderApplyBlockedByInProgressChecks("staging", inProgress)
+
+	assert.Contains(t, result, "⏳ Apply Blocked")
+	assert.Contains(t, result, "`staging`")
+	assert.Contains(t, result, "still running")
+	assert.Contains(t, result, "| `CI / unit-tests` | in_progress |")
+	assert.Contains(t, result, "| `CI / integration` | queued |")
+	assert.Contains(t, result, "Wait for checks to complete")
+	assert.Contains(t, result, "schemabot apply -e staging")
+}
+
 func TestTruncateDDL(t *testing.T) {
 	assert.Equal(t, "ALTER TABLE orders ADD INDEX idx_user_id (user_id)", truncateDDL("ALTER TABLE `orders` ADD INDEX `idx_user_id` (`user_id`)", 80))
 	assert.Equal(t, "short", truncateDDL("short", 80))

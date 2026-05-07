@@ -90,7 +90,8 @@ func (cmd *PreviewCmd) Run(g *Globals) error {
 		templates.PreviewCommentApplyWaiting, templates.PreviewCommentUnlock,
 		templates.PreviewCommentApplyBlocked, templates.PreviewCommentApplyBlockedCLI,
 		templates.PreviewCommentApplyActive,
-		templates.PreviewCommentApplyNoLock, templates.PreviewCommentApplyAllType:
+		templates.PreviewCommentApplyNoLock, templates.PreviewCommentApplyAllType,
+		templates.PreviewCommentChecksGateFailing, templates.PreviewCommentChecksGateInProgress:
 		templates.PreviewCLIOutput(previewType)
 	// Paired aggregate types (PR + CLI subsections)
 	case templates.PreviewCommentPlanAll, templates.PreviewCommentLockingAll,
