@@ -103,6 +103,25 @@ func TestFilterFailingNonSchemaBotChecks(t *testing.T) {
 	}
 }
 
+func TestFilterInProgressNonSchemaBotChecks(t *testing.T) {
+	statuses := []ghclient.PRCheckStatus{
+		{Name: "CI / tests", Status: "in_progress", Conclusion: ""},
+		{Name: "CI / lint", Status: "completed", Conclusion: "success"},
+		{Name: "Security scan", Status: "queued", Conclusion: ""},
+		{Name: "SchemaBot (staging)", Status: "in_progress", Conclusion: "", IsSchemaBot: true},
+		{Name: "Deploy preview", Status: "pending", Conclusion: ""},
+	}
+
+	inProgress := filterInProgressNonSchemaBotChecks(statuses)
+	require.Len(t, inProgress, 3)
+	assert.Equal(t, "CI / tests", inProgress[0].Name)
+	assert.Equal(t, "in_progress", inProgress[0].Conclusion)
+	assert.Equal(t, "Security scan", inProgress[1].Name)
+	assert.Equal(t, "queued", inProgress[1].Conclusion)
+	assert.Equal(t, "Deploy preview", inProgress[2].Name)
+	assert.Equal(t, "pending", inProgress[2].Conclusion)
+}
+
 func TestDDLMatchesStoredPlan(t *testing.T) {
 	tests := []struct {
 		name       string

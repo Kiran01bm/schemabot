@@ -554,6 +554,7 @@ func filterFailingNonSchemaBotChecks(statuses []ghclient.PRCheckStatus) []templa
 
 // enforcePassingChecks verifies that all non-SchemaBot PR checks are passing.
 // Returns true if apply was blocked (caller should return), false if it may proceed.
+// Blocks on both failing checks and in-progress checks with distinct messages.
 func (h *Handler) enforcePassingChecks(ctx context.Context, client *ghclient.InstallationClient, repo string, pr int, installationID int64, headSHA, environment string) bool {
 	if !h.service.Config().ShouldRequirePassingChecks() {
 		h.logger.Debug("passing checks gate disabled", "repo", repo, "pr", pr)
@@ -569,6 +570,8 @@ func (h *Handler) enforcePassingChecks(ctx context.Context, client *ghclient.Ins
 	}
 
 	failing := filterFailingNonSchemaBotChecks(statuses)
+	inProgress := filterInProgressNonSchemaBotChecks(statuses)
+
 	if len(failing) > 0 {
 		h.logger.Info("apply blocked by failing PR checks",
 			"repo", repo, "pr", pr, "environment", environment,
@@ -578,7 +581,35 @@ func (h *Handler) enforcePassingChecks(ctx context.Context, client *ghclient.Ins
 		return true
 	}
 
+	if len(inProgress) > 0 {
+		h.logger.Info("apply blocked by in-progress PR checks",
+			"repo", repo, "pr", pr, "environment", environment,
+			"in_progress_count", len(inProgress))
+		h.postComment(repo, pr, installationID,
+			templates.RenderApplyBlockedByInProgressChecks(environment, inProgress))
+		return true
+	}
+
 	return false
+}
+
+// filterInProgressNonSchemaBotChecks returns checks that are still running,
+// excluding SchemaBot's own checks.
+func filterInProgressNonSchemaBotChecks(statuses []ghclient.PRCheckStatus) []templates.FailingCheck {
+	var inProgress []templates.FailingCheck
+	for _, s := range statuses {
+		if s.IsSchemaBot {
+			continue
+		}
+		switch s.Status {
+		case "in_progress", "queued", "pending":
+			inProgress = append(inProgress, templates.FailingCheck{
+				Name:       s.Name,
+				Conclusion: s.Status,
+			})
+		}
+	}
+	return inProgress
 }
 
 // handleUnlockCommand handles the "schemabot unlock" PR comment command.
