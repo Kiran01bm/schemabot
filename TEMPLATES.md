@@ -3812,6 +3812,360 @@ No schema changes found for database 'new-db'
 ```
 </details>
 
+<details>
+<summary><a name="apply-plan-lock--confirm"></a><strong>Apply Plan (Lock + Confirm)</strong></summary>
+
+
+## MySQL Schema Change Plan (Apply)
+
+**Database**: `testapp` | **Schema Name**: `testapp` | **Environment**: `staging`
+
+*Requested by @aparajon at 2026-01-01 00:00:00 UTC*
+
+🔒 **Lock acquired by** `acme/myapp#42` at 2026-03-14 10:30:00 UTC
+
+```sql
+CREATE TABLE `users` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+    `email` varchar(255) NOT NULL,
+    `created_at` timestamp DEFAULT current_timestamp(),
+    PRIMARY KEY(`id`),
+    INDEX `idx_email`(`email`)
+) ENGINE InnoDB,
+  CHARSET utf8mb4,
+  COLLATE utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+    `user_id` bigint NOT NULL,
+    `total_cents` bigint NOT NULL,
+    `status` varchar(50) NOT NULL DEFAULT 'pending',
+    PRIMARY KEY(`id`),
+    INDEX `idx_user_id`(`user_id`)
+) ENGINE InnoDB,
+  CHARSET utf8mb4,
+  COLLATE utf8mb4_0900_ai_ci;
+
+ALTER TABLE `products` ADD INDEX `idx_category_price`(`category`, `price`);
+```
+
+📋 **Plan**: **2** tables to create, **1** table to alter
+
+
+---
+
+💡 **To apply** all schema changes from this PR, comment:
+```
+schemabot apply-confirm -e staging
+```
+
+🔓 To discard this plan and unlock, comment:
+```
+schemabot unlock
+```
+
+
+</details>
+
+<details>
+<summary><a name="apply-plan-with-options"></a><strong>Apply Plan (With Options)</strong></summary>
+
+
+## MySQL Schema Change Plan (Apply)
+
+**Database**: `testapp` | **Schema Name**: `testapp` | **Environment**: `staging`
+
+*Requested by @aparajon at 2026-01-01 00:00:00 UTC*
+
+🔒 **Lock acquired by** `acme/myapp#42` at 2026-03-14 10:30:00 UTC
+
+```sql
+CREATE TABLE `users` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+    `email` varchar(255) NOT NULL,
+    `created_at` timestamp DEFAULT current_timestamp(),
+    PRIMARY KEY(`id`),
+    INDEX `idx_email`(`email`)
+) ENGINE InnoDB,
+  CHARSET utf8mb4,
+  COLLATE utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+    `user_id` bigint NOT NULL,
+    `total_cents` bigint NOT NULL,
+    `status` varchar(50) NOT NULL DEFAULT 'pending',
+    PRIMARY KEY(`id`),
+    INDEX `idx_user_id`(`user_id`)
+) ENGINE InnoDB,
+  CHARSET utf8mb4,
+  COLLATE utf8mb4_0900_ai_ci;
+
+ALTER TABLE `products` ADD INDEX `idx_category_price`(`category`, `price`);
+```
+
+📋 **Plan**: **2** tables to create, **1** table to alter
+
+
+**Options**: ⏸️ Defer Cutover | ⏩ Skip Revert
+
+---
+
+💡 **To apply** all schema changes from this PR, comment:
+```
+schemabot apply-confirm -e staging --defer-cutover --skip-revert
+```
+
+🔓 To discard this plan and unlock, comment:
+```
+schemabot unlock
+```
+
+
+</details>
+
+<details>
+<summary><a name="apply-started"></a><strong>Apply Started</strong></summary>
+
+
+## Schema Change In Progress
+
+**Database**: `testapp` | **Environment**: `staging` | **Apply ID**: `apply-a1b2c3d4e5f6`
+
+*Applied by @aparajon at 2026-01-01 00:00:00 UTC*
+
+Schema changes are being applied. Progress updates will be posted as new comments.
+
+
+</details>
+
+<details>
+<summary><a name="unlock-success"></a><strong>Unlock Success</strong></summary>
+
+
+## 🔓 Lock Released
+
+**Database**: `testapp` | **Environment**: `staging`
+
+*Released by @aparajon at 2026-01-01 00:00:00 UTC*
+
+The database is now available for schema changes.
+
+
+</details>
+
+<details>
+<summary><a name="apply-blocked-by-other-pr"></a><strong>Apply Blocked By Other PR</strong></summary>
+
+
+## 🔒 Apply Blocked
+
+**Database**: `testapp` | **Environment**: `staging`
+
+*Requested by @aparajon at 2026-01-01 00:00:00 UTC*
+
+Another PR currently holds the lock for this database.
+
+**Locked by**: [block/myapp#42](https://github.com/block/myapp/pull/42)
+**Since**: 2026-03-15 12:30:00 UTC
+
+Wait for the other PR to complete or ask the lock holder to run `schemabot unlock`.
+
+
+</details>
+
+<details>
+<summary><a name="apply-blocked-by-cli"></a><strong>Apply Blocked By CLI</strong></summary>
+
+
+## 🔒 Apply Blocked
+
+**Database**: `testapp` | **Environment**: `staging`
+
+*Requested by @aparajon at 2026-01-01 00:00:00 UTC*
+
+A CLI session currently holds the lock for this database.
+
+**Locked by**: `cli:aparajon@macbook.local`
+**Since**: 2026-03-15 14:00:00 UTC
+
+Ask the lock holder to run `schemabot unlock` from their CLI, or force-unlock with:
+```
+schemabot unlock -d testapp -e staging --force
+```
+
+
+</details>
+
+<details>
+<summary><a name="apply-already-in-progress"></a><strong>Apply Already In Progress</strong></summary>
+
+
+## ⚠️ Apply Already In Progress
+
+**Database**: `testapp` | **Environment**: `staging`
+
+*Requested by @aparajon at 2026-01-01 00:00:00 UTC*
+
+An apply is already running for this PR (apply ID: `apply-a1b2c3d4e5f6`, state: `running`).
+
+Wait for it to complete or stop it first.
+
+
+</details>
+
+<details>
+<summary><a name="no-lock-found"></a><strong>No Lock Found</strong></summary>
+
+
+## 🔒 No Lock Found
+
+**Database**: `testapp` | **Environment**: `staging`
+
+No apply lock is held for this database. Run `apply` first to generate a plan and acquire the lock.
+
+```
+schemabot apply -e staging
+```
+
+
+</details>
+
+<details>
+<summary><a name="blocked-by-prior-env-pending"></a><strong>Blocked By Prior Env (Pending)</strong></summary>
+
+
+## ❌ Apply Blocked
+
+**Database**: `testapp` | **Environment**: `production`
+
+Staging has pending changes. Apply staging first before applying to production.
+
+```
+schemabot apply -e staging
+```
+
+
+</details>
+
+<details>
+<summary><a name="blocked-by-prior-env-failed"></a><strong>Blocked By Prior Env (Failed)</strong></summary>
+
+
+## ❌ Apply Blocked
+
+**Database**: `testapp` | **Environment**: `production`
+
+Staging failed. Fix the issue and re-apply staging before applying to production.
+
+```
+schemabot apply -e staging
+```
+
+
+</details>
+
+<details>
+<summary><a name="blocked-by-prior-env-in-progress"></a><strong>Blocked By Prior Env (In Progress)</strong></summary>
+
+
+## ⏳ Apply Blocked
+
+**Database**: `testapp` | **Environment**: `production`
+
+Staging is currently in progress. Wait for it to complete before applying to production.
+
+Once staging completes, retry:
+```
+schemabot apply -e production
+```
+
+
+</details>
+
+<details>
+<summary><a name="review-required-codeowners"></a><strong>Review Required (Codeowners)</strong></summary>
+
+
+## Review Required
+
+**Database**: `testapp` | **Environment**: `staging`
+
+*Requested by @aparajon at 2026-01-01 00:00:00 UTC*
+
+Schema changes require approval from a code owner before applying.
+
+**Code owners** (from CODEOWNERS):
+- @acme/schema-reviewers
+- @jdoe
+
+### Next steps
+1. Request a review from a code owner above
+2. Once approved, run `schemabot apply -e staging` again
+
+
+</details>
+
+<details>
+<summary><a name="review-gate-error-failclosed"></a><strong>Review Gate Error (Fail-closed)</strong></summary>
+
+
+## ❌ Apply Failed
+
+**Environment**: `staging`
+
+*Requested by @aparajon at  UTC*
+
+### Error
+
+> Review gate check failed: expand team @acme/schema-reviewers: API rate limit exceeded. An admin can run schema changes directly via the CLI to bypass the review gate.
+
+</details>
+
+<details>
+<summary><a name="checks-gate-failing"></a><strong>Checks Gate: Failing</strong></summary>
+
+
+## ❌ Apply Blocked
+
+**Environment**: `staging`
+
+Cannot apply while PR checks are failing:
+
+| Check | Status |
+|-------|--------|
+| `CI / unit-tests` | failure |
+| `CI / lint` | timed_out |
+
+Fix the failing checks and retry:
+```
+schemabot apply -e staging
+```
+
+
+</details>
+
+<details>
+<summary><a name="checks-gate-in-progress"></a><strong>Checks Gate: In Progress</strong></summary>
+
+
+## ⏳ Apply Blocked
+
+**Environment**: `staging`
+
+Cannot apply while PR checks are still running:
+
+| Check | Status |
+|-------|--------|
+| `CI / unit-tests` | in_progress |
+| `CI / integration-tests` | queued |
+
+Wait for checks to complete and retry:
+```
+schemabot apply -e staging
+```
+
+</details>
 ## Sequential Mode (CLI)
 
 <details>
