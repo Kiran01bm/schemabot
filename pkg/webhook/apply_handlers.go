@@ -563,10 +563,10 @@ func (h *Handler) enforcePassingChecks(ctx context.Context, client *ghclient.Ins
 
 	statuses, err := client.GetPRCheckStatuses(ctx, repo, headSHA)
 	if err != nil {
-		// Graceful degradation: log the error but allow the apply to proceed.
-		// Blocking applies when the GitHub API is unreachable would be too disruptive.
-		h.logger.Warn("failed to fetch PR check statuses, skipping checks gate", "repo", repo, "pr", pr, "error", err)
-		return false
+		h.logger.Error("failed to fetch PR check statuses, blocking apply", "repo", repo, "pr", pr, "error", err)
+		h.postComment(repo, pr, installationID,
+			fmt.Sprintf("## ❌ Apply Blocked\n\n**Environment**: `%s`\n\nCould not verify PR check statuses. Retry the apply command.\n\n_Error: %v_", environment, err))
+		return true
 	}
 
 	failing := filterFailingNonSchemaBotChecks(statuses)

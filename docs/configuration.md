@@ -113,7 +113,7 @@ A check is considered "failing" if its status is `completed` and its conclusion 
 
 When checks are failing, SchemaBot posts a comment listing the failing checks and instructs the user to fix them before retrying.
 
-If the GitHub API is unreachable when checking statuses, SchemaBot logs a warning and allows the apply to proceed (graceful degradation).
+If the GitHub API is unreachable when checking statuses, the apply is blocked (fail-closed). SchemaBot posts a comment explaining the error and suggests retrying.
 
 Set `require_passing_checks: false` to disable this gate.
 
