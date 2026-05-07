@@ -1,11 +1,14 @@
 package webhook
 
 import (
+	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/schemabot/pkg/api"
 	"github.com/block/schemabot/pkg/apitypes"
 	ghclient "github.com/block/schemabot/pkg/github"
 	"github.com/block/schemabot/pkg/storage"
@@ -120,6 +123,196 @@ func TestFilterInProgressNonSchemaBotChecks(t *testing.T) {
 	assert.Equal(t, "queued", inProgress[1].Conclusion)
 	assert.Equal(t, "Deploy preview", inProgress[2].Name)
 	assert.Equal(t, "pending", inProgress[2].Conclusion)
+}
+
+func TestEnforcePassingChecks(t *testing.T) {
+	t.Run("API failure blocks apply (fail-closed)", func(t *testing.T) {
+		client, mux := setupGitHubServer(t)
+		comments := make(chan string, 10)
+
+		// Return 500 for check runs API
+		mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/check-runs", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+
+		mux.HandleFunc("POST /repos/octocat/hello-world/issues/1/comments", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Body string `json:"body"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			comments <- body.Body
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99})
+		})
+
+		installClient := ghclient.NewInstallationClient(client, testLogger())
+		factory := &fakeClientFactory{client: installClient}
+
+		service := api.New(nil, &api.ServerConfig{}, nil, testLogger())
+		h := &Handler{
+			service:  service,
+			ghClient: factory,
+			logger:   testLogger(),
+		}
+
+		ctx := t.Context()
+		blocked := h.enforcePassingChecks(ctx, installClient, "octocat/hello-world", 1, 12345, "abc123", "staging")
+		assert.True(t, blocked, "should block when API fails")
+
+		select {
+		case body := <-comments:
+			assert.Contains(t, body, "Apply Blocked")
+			assert.Contains(t, body, "Could not verify")
+		default:
+			// Comment may be posted async — the key assertion is blocked=true
+		}
+	})
+
+	t.Run("failing checks block apply", func(t *testing.T) {
+		client, mux := setupGitHubServer(t)
+		comments := make(chan string, 10)
+
+		mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/check-runs", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 2,
+				"check_runs": []map[string]any{
+					{"name": "CI / tests", "status": "completed", "conclusion": "failure"},
+					{"name": "CI / lint", "status": "completed", "conclusion": "success"},
+				},
+			})
+		})
+
+		mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/statuses", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		})
+
+		mux.HandleFunc("POST /repos/octocat/hello-world/issues/1/comments", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Body string `json:"body"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			comments <- body.Body
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99})
+		})
+
+		installClient := ghclient.NewInstallationClient(client, testLogger())
+		factory := &fakeClientFactory{client: installClient}
+
+		service := api.New(nil, &api.ServerConfig{}, nil, testLogger())
+		h := &Handler{
+			service:  service,
+			ghClient: factory,
+			logger:   testLogger(),
+		}
+
+		ctx := t.Context()
+		blocked := h.enforcePassingChecks(ctx, installClient, "octocat/hello-world", 1, 12345, "abc123", "staging")
+		assert.True(t, blocked, "should block when checks are failing")
+
+		select {
+		case body := <-comments:
+			assert.Contains(t, body, "CI / tests")
+			assert.Contains(t, body, "failure")
+		default:
+		}
+	})
+
+	t.Run("all passing allows apply", func(t *testing.T) {
+		client, mux := setupGitHubServer(t)
+
+		mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/check-runs", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 2,
+				"check_runs": []map[string]any{
+					{"name": "CI / tests", "status": "completed", "conclusion": "success"},
+					{"name": "SchemaBot (staging)", "status": "completed", "conclusion": "action_required"},
+				},
+			})
+		})
+
+		mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/statuses", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		})
+
+		installClient := ghclient.NewInstallationClient(client, testLogger())
+		factory := &fakeClientFactory{client: installClient}
+
+		service := api.New(nil, &api.ServerConfig{}, nil, testLogger())
+		h := &Handler{
+			service:  service,
+			ghClient: factory,
+			logger:   testLogger(),
+		}
+
+		ctx := t.Context()
+		blocked := h.enforcePassingChecks(ctx, installClient, "octocat/hello-world", 1, 12345, "abc123", "staging")
+		assert.False(t, blocked, "should allow when all non-SchemaBot checks pass")
+	})
+
+	t.Run("in-progress checks block apply", func(t *testing.T) {
+		client, mux := setupGitHubServer(t)
+		comments := make(chan string, 10)
+
+		mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/check-runs", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 1,
+				"check_runs": []map[string]any{
+					{"name": "CI / tests", "status": "in_progress", "conclusion": nil},
+				},
+			})
+		})
+
+		mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/statuses", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		})
+
+		mux.HandleFunc("POST /repos/octocat/hello-world/issues/1/comments", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Body string `json:"body"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			comments <- body.Body
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99})
+		})
+
+		installClient := ghclient.NewInstallationClient(client, testLogger())
+		factory := &fakeClientFactory{client: installClient}
+
+		service := api.New(nil, &api.ServerConfig{}, nil, testLogger())
+		h := &Handler{
+			service:  service,
+			ghClient: factory,
+			logger:   testLogger(),
+		}
+
+		ctx := t.Context()
+		blocked := h.enforcePassingChecks(ctx, installClient, "octocat/hello-world", 1, 12345, "abc123", "staging")
+		assert.True(t, blocked, "should block when checks are in-progress")
+
+		select {
+		case body := <-comments:
+			assert.Contains(t, body, "still running")
+		default:
+		}
+	})
+
+	t.Run("disabled by config", func(t *testing.T) {
+		client, _ := setupGitHubServer(t)
+		installClient := ghclient.NewInstallationClient(client, testLogger())
+
+		falseVal := false
+		service := api.New(nil, &api.ServerConfig{RequirePassingChecks: &falseVal}, nil, testLogger())
+		h := &Handler{
+			service: service,
+			logger:  testLogger(),
+		}
+
+		ctx := t.Context()
+		blocked := h.enforcePassingChecks(ctx, installClient, "octocat/hello-world", 1, 12345, "abc123", "staging")
+		assert.False(t, blocked, "should not block when disabled")
+	})
 }
 
 func TestDDLMatchesStoredPlan(t *testing.T) {
