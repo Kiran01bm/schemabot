@@ -185,6 +185,9 @@ func setupFakeGitHubForReviewGate(
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1})
 	})
 
+	// PR check statuses (all passing) for enforcePassingChecks
+	registerPassingChecks(mux)
+
 	return result
 }
 
