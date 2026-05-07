@@ -332,8 +332,11 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 
 	var statuses []PRCheckStatus
 
-	// Fetch check runs (Checks API)
+	// Fetch check runs (Checks API). Filter to "latest" to avoid stale reruns
+	// where an old failure could block apply even though the latest run passed.
+	latestFilter := "latest"
 	checkOpts := &gh.ListCheckRunsOptions{
+		Filter:      &latestFilter,
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
 	for {
@@ -356,7 +359,9 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 		checkOpts.ListOptions.Page = resp.NextPage
 	}
 
-	// Fetch commit statuses (legacy Status API)
+	// Fetch commit statuses (legacy Status API). The API returns statuses
+	// newest-first, so deduplicate by context to keep only the latest per context.
+	seenContexts := make(map[string]bool)
 	statusOpts := &gh.ListOptions{PerPage: 100}
 	for {
 		repoStatuses, resp, err := ic.client.Repositories.ListStatuses(ctx, owner, repoName, ref, statusOpts)
@@ -364,7 +369,12 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 			return nil, fmt.Errorf("list commit statuses for ref %s: %w", ref, err)
 		}
 		for _, s := range repoStatuses {
-			ctx := s.GetContext()
+			statusCtx := s.GetContext()
+			if seenContexts[statusCtx] {
+				continue
+			}
+			seenContexts[statusCtx] = true
+
 			// Map legacy status states to check run equivalents
 			ghState := s.GetState()
 			status := "completed"
@@ -374,10 +384,10 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 				conclusion = ""
 			}
 			statuses = append(statuses, PRCheckStatus{
-				Name:        ctx,
+				Name:        statusCtx,
 				Status:      status,
 				Conclusion:  conclusion,
-				IsSchemaBot: strings.HasPrefix(strings.ToLower(ctx), "schemabot"),
+				IsSchemaBot: strings.HasPrefix(strings.ToLower(statusCtx), "schemabot"),
 			})
 		}
 		if resp.NextPage == 0 {
