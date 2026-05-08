@@ -252,6 +252,21 @@ type checkRunCapture struct {
 	Conclusion string `json:"conclusion"`
 }
 
+// registerPassingChecks adds mock endpoints for PR check statuses that return
+// all-passing results. This prevents enforcePassingChecks from blocking apply
+// commands in e2e tests.
+func registerPassingChecks(mux *http.ServeMux) {
+	mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 0,
+			"check_runs":  []map[string]any{},
+		})
+	})
+	mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/statuses", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{})
+	})
+}
+
 // setupFakeGitHubForPlan sets up a fake GitHub server for plan flows.
 // schemaSQL maps filename -> content. Files are placed under schema/{namespace}/.
 // namespace is the MySQL schema name (required).
