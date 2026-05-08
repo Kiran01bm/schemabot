@@ -199,7 +199,7 @@ func PreviewCommentReviewGateError() string {
 		RequestedBy: "aparajon",
 		Environment: "staging",
 		CommandName: action.Apply,
-		ErrorDetail: "Review gate check failed: expand team @acme/schema-reviewers: API rate limit exceeded. An admin can run schema changes directly via the CLI to bypass the review gate.",
+		ErrorDetail: "Review gate check failed: expand team @acme/schema-reviewers: API rate limit exceeded.",
 	})
 }
 

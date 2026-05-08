@@ -29,7 +29,7 @@ When enabled, `schemabot apply` and `schemabot apply-confirm` check for PR appro
 
 3. **Self-approval blocked**: The PR author's own approval never counts, even if they're a code owner.
 
-4. **Fail closed**: If the GitHub API fails during the review check, SchemaBot blocks the apply and posts an error comment. Admins can run schema changes directly via the CLI to bypass the review gate.
+4. **Fail closed**: If the GitHub API fails during the review check, SchemaBot blocks the apply and posts an error comment.
 
 If the gate blocks, SchemaBot posts a comment listing the required reviewers and instructions.
 

@@ -28,7 +28,7 @@ func (h *Handler) enforceReviewGate(ctx context.Context, client *ghclient.Instal
 			RequestedBy: requestedBy,
 			Environment: environment,
 			CommandName: commandName,
-			ErrorDetail: "Review gate check failed: " + err.Error() + ". An admin can run schema changes directly via the CLI to bypass the review gate.",
+			ErrorDetail: "Review gate check failed: " + err.Error(),
 		}))
 		return true
 	}

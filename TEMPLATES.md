@@ -1111,7 +1111,7 @@ Schema changes require approval from a code owner before applying.
 
 ### Error
 
-> Review gate check failed: expand team @acme/schema-reviewers: API rate limit exceeded. An admin can run schema changes directly via the CLI to bypass the review gate.
+> Review gate check failed: expand team @acme/schema-reviewers: API rate limit exceeded.
 </details>
 
 ### CLI Output
@@ -4118,7 +4118,7 @@ Schema changes require approval from a code owner before applying.
 
 ### Error
 
-> Review gate check failed: expand team @acme/schema-reviewers: API rate limit exceeded. An admin can run schema changes directly via the CLI to bypass the review gate.
+> Review gate check failed: expand team @acme/schema-reviewers: API rate limit exceeded.
 
 </details>
 
