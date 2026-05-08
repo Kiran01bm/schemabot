@@ -426,7 +426,8 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 		if !contexts.PageInfo.HasNextPage {
 			break
 		}
-		vars["after"] = githubv4.NewString(contexts.PageInfo.EndCursor)
+		after := contexts.PageInfo.EndCursor
+		vars["after"] = &after
 	}
 	return out, nil
 }
