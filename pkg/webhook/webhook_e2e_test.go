@@ -252,18 +252,19 @@ type checkRunCapture struct {
 	Conclusion string `json:"conclusion"`
 }
 
-// registerPassingChecks adds mock endpoints for PR check statuses that return
-// all-passing results. This prevents enforcePassingChecks from blocking apply
-// commands in e2e tests.
+// registerPassingChecks adds a mock GraphQL endpoint for PR check statuses that
+// returns an empty rollup (no checks). This prevents enforcePassingChecks from
+// blocking apply commands in e2e tests.
 func registerPassingChecks(mux *http.ServeMux) {
-	mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST /graphql", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"total_count": 0,
-			"check_runs":  []map[string]any{},
+			"data": map[string]any{"repository": map[string]any{"object": map[string]any{
+				"statusCheckRollup": map[string]any{"contexts": map[string]any{
+					"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
+					"nodes":    []map[string]any{},
+				}},
+			}}},
 		})
-	})
-	mux.HandleFunc("GET /repos/octocat/hello-world/commits/abc123/statuses", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{})
 	})
 }
 

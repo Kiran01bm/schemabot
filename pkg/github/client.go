@@ -17,6 +17,7 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	gh "github.com/google/go-github/v68/github"
+	"github.com/shurcooL/githubv4"
 )
 
 // GitHubClientFactory creates installation-scoped GitHub clients.
@@ -49,21 +50,38 @@ func (c *Client) ForInstallation(installationID int64) (*InstallationClient, err
 	if err != nil {
 		return nil, fmt.Errorf("create installation transport: %w", err)
 	}
+	httpc := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	ghClient := gh.NewClient(httpc)
 	return &InstallationClient{
-		client: gh.NewClient(&http.Client{Transport: transport, Timeout: 30 * time.Second}),
+		client: ghClient,
+		gql:    githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
 		logger: c.logger,
 	}, nil
 }
 
 // NewInstallationClient creates an InstallationClient from a pre-configured go-github client.
 // Used in tests to point at httptest.Server; production uses Client.ForInstallation().
+// The GraphQL endpoint is derived from the go-github client's BaseURL so the same
+// httptest mux serves both REST and GraphQL.
 func NewInstallationClient(client *gh.Client, logger *slog.Logger) *InstallationClient {
-	return &InstallationClient{client: client, logger: logger}
+	return &InstallationClient{
+		client: client,
+		gql:    githubv4.NewEnterpriseClient(graphQLURLFor(client), client.Client()),
+		logger: logger,
+	}
+}
+
+// graphQLURLFor returns the GraphQL endpoint for a given go-github client by
+// appending "graphql" to its REST BaseURL. Works for both api.github.com and
+// httptest servers used in tests.
+func graphQLURLFor(client *gh.Client) string {
+	return strings.TrimRight(client.BaseURL.String(), "/") + "/graphql"
 }
 
 // InstallationClient wraps a go-github client scoped to a specific GitHub App installation.
 type InstallationClient struct {
 	client *gh.Client
+	gql    *githubv4.Client
 	logger *slog.Logger
 }
 
@@ -324,79 +342,112 @@ type PRCheckStatus struct {
 	IsSchemaBot bool   // true if this is a SchemaBot check
 }
 
-// GetPRCheckStatuses fetches all check runs and commit statuses for a ref,
-// combining them into a unified list. SchemaBot's own checks are marked with
-// IsSchemaBot=true so callers can filter them out.
+// schemaBotAppSlug is the GitHub App slug used to identify SchemaBot's own
+// check runs via checkSuite.app.slug from the GraphQL statusCheckRollup.
+const schemaBotAppSlug = "schemabot"
+
+// statusCheckRollupQuery is the GraphQL query used by GetPRCheckStatuses.
+// statusCheckRollup returns check runs and commit statuses already deduped
+// and filtered to the latest run per check name.
+type statusCheckRollupQuery struct {
+	Repository struct {
+		Object struct {
+			Commit struct {
+				StatusCheckRollup struct {
+					Contexts struct {
+						PageInfo struct {
+							HasNextPage bool
+							EndCursor   githubv4.String
+						}
+						Nodes []struct {
+							Typename string `graphql:"__typename"`
+							CheckRun struct {
+								Name       string
+								Status     string
+								Conclusion string
+								CheckSuite struct {
+									App struct {
+										Slug string
+									}
+								}
+							} `graphql:"... on CheckRun"`
+							StatusContext struct {
+								Context string
+								State   string
+							} `graphql:"... on StatusContext"`
+						}
+					} `graphql:"contexts(first: 100, after: $after)"`
+				}
+			} `graphql:"... on Commit"`
+		} `graphql:"object(oid: $oid)"`
+	} `graphql:"repository(owner: $owner, name: $repo)"`
+}
+
+// GetPRCheckStatuses fetches all check runs and commit statuses for a ref via
+// the GraphQL Commit.statusCheckRollup, which returns already-deduped, latest-only
+// results in a single round trip. SchemaBot's own check runs are identified via
+// the GitHub App slug (more reliable than name matching).
 func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo string, ref string) ([]PRCheckStatus, error) {
 	owner, repoName := splitRepo(repo)
 
-	var statuses []PRCheckStatus
-
-	// Fetch check runs (Checks API). Filter to "latest" to avoid stale reruns
-	// where an old failure could block apply even though the latest run passed.
-	latestFilter := "latest"
-	checkOpts := &gh.ListCheckRunsOptions{
-		Filter:      &latestFilter,
-		ListOptions: gh.ListOptions{PerPage: 100},
+	vars := map[string]any{
+		"owner": githubv4.String(owner),
+		"repo":  githubv4.String(repoName),
+		"oid":   githubv4.GitObjectID(ref),
+		"after": (*githubv4.String)(nil),
 	}
+
+	var out []PRCheckStatus
 	for {
-		result, resp, err := ic.client.Checks.ListCheckRunsForRef(ctx, owner, repoName, ref, checkOpts)
-		if err != nil {
-			return nil, fmt.Errorf("list check runs for ref %s: %w", ref, err)
+		var q statusCheckRollupQuery
+		if err := ic.gql.Query(ctx, &q, vars); err != nil {
+			return nil, fmt.Errorf("graphql statusCheckRollup ref %s: %w", ref, err)
 		}
-		for _, cr := range result.CheckRuns {
-			name := cr.GetName()
-			statuses = append(statuses, PRCheckStatus{
-				Name:        name,
-				Status:      cr.GetStatus(),
-				Conclusion:  cr.GetConclusion(),
-				IsSchemaBot: strings.HasPrefix(strings.ToLower(name), "schemabot"),
-			})
+		contexts := q.Repository.Object.Commit.StatusCheckRollup.Contexts
+		for _, n := range contexts.Nodes {
+			switch n.Typename {
+			case "CheckRun":
+				out = append(out, PRCheckStatus{
+					Name:        n.CheckRun.Name,
+					Status:      strings.ToLower(n.CheckRun.Status),
+					Conclusion:  strings.ToLower(n.CheckRun.Conclusion),
+					IsSchemaBot: strings.EqualFold(n.CheckRun.CheckSuite.App.Slug, schemaBotAppSlug),
+				})
+			case "StatusContext":
+				status, conclusion := mapLegacyStatusState(n.StatusContext.State)
+				out = append(out, PRCheckStatus{
+					Name:        n.StatusContext.Context,
+					Status:      status,
+					Conclusion:  conclusion,
+					IsSchemaBot: strings.HasPrefix(strings.ToLower(n.StatusContext.Context), schemaBotAppSlug),
+				})
+			}
 		}
-		if resp.NextPage == 0 {
+		if !contexts.PageInfo.HasNextPage {
 			break
 		}
-		checkOpts.Page = resp.NextPage
+		after := contexts.PageInfo.EndCursor
+		vars["after"] = &after
 	}
+	return out, nil
+}
 
-	// Fetch commit statuses (legacy Status API). The API returns statuses
-	// newest-first, so deduplicate by context to keep only the latest per context.
-	seenContexts := make(map[string]bool)
-	statusOpts := &gh.ListOptions{PerPage: 100}
-	for {
-		repoStatuses, resp, err := ic.client.Repositories.ListStatuses(ctx, owner, repoName, ref, statusOpts)
-		if err != nil {
-			return nil, fmt.Errorf("list commit statuses for ref %s: %w", ref, err)
-		}
-		for _, s := range repoStatuses {
-			statusCtx := s.GetContext()
-			if seenContexts[statusCtx] {
-				continue
-			}
-			seenContexts[statusCtx] = true
-
-			// Map legacy status states to check run equivalents
-			ghState := s.GetState()
-			status := "completed"
-			conclusion := ghState
-			if ghState == "pending" {
-				status = "in_progress"
-				conclusion = ""
-			}
-			statuses = append(statuses, PRCheckStatus{
-				Name:        statusCtx,
-				Status:      status,
-				Conclusion:  conclusion,
-				IsSchemaBot: strings.HasPrefix(strings.ToLower(statusCtx), "schemabot"),
-			})
-		}
-		if resp.NextPage == 0 {
-			break
-		}
-		statusOpts.Page = resp.NextPage
+// mapLegacyStatusState maps a GraphQL StatusState enum (EXPECTED, ERROR, FAILURE,
+// PENDING, SUCCESS) to the (status, conclusion) pair used by PRCheckStatus, so
+// downstream filters can treat check runs and legacy statuses uniformly.
+func mapLegacyStatusState(state string) (status, conclusion string) {
+	switch strings.ToUpper(state) {
+	case "PENDING", "EXPECTED":
+		return "in_progress", ""
+	case "SUCCESS":
+		return "completed", "success"
+	case "FAILURE":
+		return "completed", "failure"
+	case "ERROR":
+		return "completed", "error"
+	default:
+		return "completed", strings.ToLower(state)
 	}
-
-	return statuses, nil
 }
 
 // TreeEntry represents a single entry in a Git tree.
