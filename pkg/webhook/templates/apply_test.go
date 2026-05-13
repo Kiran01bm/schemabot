@@ -348,7 +348,7 @@ func TestRenderApplyBlockedByFailingChecks_SingleCheck(t *testing.T) {
 }
 
 func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
-	t.Run("generic error is shown verbatim with retry hint", func(t *testing.T) {
+	t.Run("generic error is shown verbatim", func(t *testing.T) {
 		err := errors.New("graphql query failed: 500 Internal Server Error")
 
 		result := RenderApplyBlockedByCheckStatusError("staging", err)
@@ -357,7 +357,8 @@ func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
 		assert.Contains(t, result, "**Environment**: `staging`")
 		assert.Contains(t, result, "Unable to verify PR check statuses")
 		assert.Contains(t, result, "graphql query failed: 500 Internal Server Error")
-		assert.Contains(t, result, "schemabot apply -e staging")
+		assert.NotContains(t, result, "schemabot apply -e",
+			"API-error variant does not include a retry instruction")
 	})
 
 	t.Run("permission error surfaces a targeted hint", func(t *testing.T) {

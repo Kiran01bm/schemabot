@@ -280,8 +280,7 @@ func RenderApplyBlockedByCheckStatusError(environment string, err error) string 
 	if err != nil {
 		fmt.Fprintf(&sb, "%s\n", err)
 	}
-	sb.WriteString("```\n\n")
-	fmt.Fprintf(&sb, "Retry:\n```\nschemabot apply -e %s\n```\n", environment)
+	sb.WriteString("```\n")
 
 	return sb.String()
 }
