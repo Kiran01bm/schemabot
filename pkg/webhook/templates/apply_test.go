@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -344,6 +345,41 @@ func TestRenderApplyBlockedByFailingChecks_SingleCheck(t *testing.T) {
 	assert.Contains(t, result, "`production`")
 	assert.Contains(t, result, "| `security-scan` | error |")
 	assert.Contains(t, result, "schemabot apply -e production")
+}
+
+func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
+	t.Run("generic error is shown verbatim with retry hint", func(t *testing.T) {
+		err := errors.New("graphql query failed: 500 Internal Server Error")
+
+		result := RenderApplyBlockedByCheckStatusError("staging", err)
+
+		assert.Contains(t, result, "## ❌ Apply Blocked")
+		assert.Contains(t, result, "**Environment**: `staging`")
+		assert.Contains(t, result, "Unable to verify PR check statuses")
+		assert.Contains(t, result, "graphql query failed: 500 Internal Server Error")
+		assert.Contains(t, result, "schemabot apply -e staging")
+	})
+
+	t.Run("permission error surfaces a targeted hint", func(t *testing.T) {
+		err := errors.New("GET https://api.github.com/...: 403 Resource not accessible by integration")
+
+		result := RenderApplyBlockedByCheckStatusError("production", err)
+
+		assert.Contains(t, result, "## ❌ Apply Blocked")
+		assert.Contains(t, result, "**Environment**: `production`")
+		assert.Contains(t, result, "does not have permission to read check statuses")
+		assert.Contains(t, result, "**Commit statuses: Read**")
+		assert.NotContains(t, result, "Unable to verify PR check statuses",
+			"permission branch should replace the generic verbatim message")
+	})
+
+	t.Run("nil error renders without panicking", func(t *testing.T) {
+		result := RenderApplyBlockedByCheckStatusError("staging", nil)
+
+		assert.Contains(t, result, "## ❌ Apply Blocked")
+		assert.Contains(t, result, "**Environment**: `staging`")
+		assert.Contains(t, result, "Unable to verify PR check statuses")
+	})
 }
 
 func TestRenderApplyBlockedByInProgressChecks(t *testing.T) {
