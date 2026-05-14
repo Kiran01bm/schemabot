@@ -78,3 +78,77 @@ func RenderRollbackConfirmNoLock(database, environment string) string {
 		"No rollback lock is held. Run `schemabot rollback <apply-id> -e %s` first to generate a rollback plan.",
 		database, environment, environment)
 }
+
+// RenderRollbackMissingApplyID renders the message posted when `schemabot rollback`
+// is invoked without an apply ID argument.
+func RenderRollbackMissingApplyID() string {
+	return "## Missing Apply ID\n\n" +
+		"Usage: `schemabot rollback <apply-id> -e <environment>`\n\n" +
+		"You can find the apply ID in the summary comment of a completed apply, " +
+		"or by running `schemabot status`."
+}
+
+// RenderRollbackApplyNotFound renders the message posted when the supplied apply ID
+// does not match any stored apply.
+func RenderRollbackApplyNotFound(applyID string) string {
+	return fmt.Sprintf("## Apply Not Found\n\n"+
+		"No apply found with ID `%s`. Check the ID and try again.", applyID)
+}
+
+// RenderRollbackBlockedByLock renders the message posted when a rollback cannot
+// acquire the database lock because another caller holds it. When lockRepo and
+// lockPR are populated, the holder is rendered as a PR link; otherwise the bare
+// owner string is shown.
+func RenderRollbackBlockedByLock(database, environment, lockOwner, lockRepo string, lockPR int) string {
+	if lockPR > 0 && lockRepo != "" {
+		return fmt.Sprintf("## Rollback Blocked\n\n"+
+			"**Database**: `%s` | **Environment**: `%s`\n\n"+
+			"A lock is currently held by [%s#%d](https://github.com/%s/pull/%d).\n\n"+
+			"Wait for that operation to complete, or ask the lock owner to run `schemabot unlock`.",
+			database, environment,
+			lockRepo, lockPR,
+			lockRepo, lockPR)
+	}
+	return fmt.Sprintf("## Rollback Blocked\n\n"+
+		"**Database**: `%s` | **Environment**: `%s`\n\n"+
+		"A lock is currently held by `%s`.\n\n"+
+		"Wait for that operation to complete, or ask the lock owner to release it.",
+		database, environment, lockOwner)
+}
+
+// RenderRollbackNothingToDo renders the message posted when a rollback plan
+// produces no schema changes for the supplied apply ID.
+func RenderRollbackNothingToDo(database, environment, applyID string) string {
+	return fmt.Sprintf("## Nothing to Rollback\n\n"+
+		"**Database**: `%s` | **Environment**: `%s`\n\n"+
+		"The database schema already matches the state before apply `%s`. No rollback needed.",
+		database, environment, applyID)
+}
+
+// RenderRollbackLockNotOwned renders the message posted when rollback-confirm is
+// invoked against a lock held by a different caller.
+func RenderRollbackLockNotOwned(database, environment, lockOwner string) string {
+	return fmt.Sprintf("## Lock Not Owned\n\n"+
+		"**Database**: `%s` | **Environment**: `%s`\n\n"+
+		"The lock is held by `%s`, not this PR. Cannot confirm rollback.",
+		database, environment, lockOwner)
+}
+
+// RenderRollbackAlreadyRolledBack renders the message posted when rollback-confirm
+// re-plans and finds no changes remain — typically because the rollback already
+// ran in a separate path.
+func RenderRollbackAlreadyRolledBack(database, environment string) string {
+	return fmt.Sprintf("## Already Rolled Back\n\n"+
+		"**Database**: `%s` | **Environment**: `%s`\n\n"+
+		"The database schema already matches the original state. Lock released.",
+		database, environment)
+}
+
+// RenderRollbackNotAccepted renders the message posted when the apply service
+// rejects a rollback request (e.g. plan not found, validation error).
+func RenderRollbackNotAccepted(database, environment, errorMessage string) string {
+	return fmt.Sprintf("## Rollback Not Accepted\n\n"+
+		"**Database**: `%s` | **Environment**: `%s`\n\n"+
+		"The rollback was not accepted: %s",
+		database, environment, errorMessage)
+}

@@ -22,11 +22,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 
 	applyID := result.ApplyID
 	if applyID == "" {
-		h.postComment(repo, pr, installationID,
-			"## Missing Apply ID\n\n"+
-				"Usage: `schemabot rollback <apply-id> -e <environment>`\n\n"+
-				"You can find the apply ID in the summary comment of a completed apply, "+
-				"or by running `schemabot status`.")
+		h.postComment(repo, pr, installationID, templates.RenderRollbackMissingApplyID())
 		return
 	}
 
@@ -47,9 +43,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 		return
 	}
 	if apply == nil {
-		h.postComment(repo, pr, installationID, fmt.Sprintf(
-			"## Apply Not Found\n\n"+
-				"No apply found with ID `%s`. Check the ID and try again.", applyID))
+		h.postComment(repo, pr, installationID, templates.RenderRollbackApplyNotFound(applyID))
 		return
 	}
 
@@ -82,23 +76,9 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 	lockOwner := fmt.Sprintf("%s#%d", repo, pr)
 
 	if existingLock != nil && existingLock.Owner != lockOwner {
-		if existingLock.PullRequest > 0 && existingLock.Repository != "" {
-			h.postComment(repo, pr, installationID, fmt.Sprintf(
-				"## Rollback Blocked\n\n"+
-					"**Database**: `%s` | **Environment**: `%s`\n\n"+
-					"A lock is currently held by [%s#%d](https://github.com/%s/pull/%d).\n\n"+
-					"Wait for that operation to complete, or ask the lock owner to run `schemabot unlock`.",
-				database, environment,
-				existingLock.Repository, existingLock.PullRequest,
-				existingLock.Repository, existingLock.PullRequest))
-		} else {
-			h.postComment(repo, pr, installationID, fmt.Sprintf(
-				"## Rollback Blocked\n\n"+
-					"**Database**: `%s` | **Environment**: `%s`\n\n"+
-					"A lock is currently held by `%s`.\n\n"+
-					"Wait for that operation to complete, or ask the lock owner to release it.",
-				database, environment, existingLock.Owner))
-		}
+		h.postComment(repo, pr, installationID, templates.RenderRollbackBlockedByLock(
+			database, environment,
+			existingLock.Owner, existingLock.Repository, existingLock.PullRequest))
 		return
 	}
 
@@ -121,11 +101,8 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 	}
 
 	if len(planResp.FlatTables()) == 0 {
-		h.postComment(repo, pr, installationID, fmt.Sprintf(
-			"## Nothing to Rollback\n\n"+
-				"**Database**: `%s` | **Environment**: `%s`\n\n"+
-				"The database schema already matches the state before apply `%s`. No rollback needed.",
-			database, environment, applyID))
+		h.postComment(repo, pr, installationID,
+			templates.RenderRollbackNothingToDo(database, environment, applyID))
 		return
 	}
 
@@ -221,11 +198,8 @@ func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment,
 		return
 	}
 	if existingLock.Owner != lockOwner {
-		h.postComment(repo, pr, installationID, fmt.Sprintf(
-			"## Lock Not Owned\n\n"+
-				"**Database**: `%s` | **Environment**: `%s`\n\n"+
-				"The lock is held by `%s`, not this PR. Cannot confirm rollback.",
-			database, environment, existingLock.Owner))
+		h.postComment(repo, pr, installationID,
+			templates.RenderRollbackLockNotOwned(database, environment, existingLock.Owner))
 		return
 	}
 
@@ -246,11 +220,8 @@ func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment,
 	// If no changes remain, release lock and notify
 	if len(planResp.FlatTables()) == 0 {
 		_ = h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
-		h.postComment(repo, pr, installationID, fmt.Sprintf(
-			"## Already Rolled Back\n\n"+
-				"**Database**: `%s` | **Environment**: `%s`\n\n"+
-				"The database schema already matches the original state. Lock released.",
-			database, environment))
+		h.postComment(repo, pr, installationID,
+			templates.RenderRollbackAlreadyRolledBack(database, environment))
 		return
 	}
 
@@ -285,11 +256,8 @@ func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment,
 	}
 
 	if !applyResp.Accepted {
-		h.postComment(repo, pr, installationID, fmt.Sprintf(
-			"## Rollback Not Accepted\n\n"+
-				"**Database**: `%s` | **Environment**: `%s`\n\n"+
-				"The rollback was not accepted: %s",
-			database, environment, applyResp.ErrorMessage))
+		h.postComment(repo, pr, installationID,
+			templates.RenderRollbackNotAccepted(database, environment, applyResp.ErrorMessage))
 		return
 	}
 

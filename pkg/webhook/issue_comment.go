@@ -91,8 +91,7 @@ func (h *Handler) handleIssueComment(w http.ResponseWriter, body []byte) {
 	// Reject commands from repositories not in the configured allowlist
 	if h.service != nil && !h.service.Config().IsRepoAllowed(repo) {
 		h.logger.Warn("webhook from unregistered repository", "repo", repo, "pr", pr)
-		h.postComment(repo, pr, installationID,
-			"**Repository not registered.** This repository is not in SchemaBot's configuration. To onboard, add it to the `repos` section of SchemaBot's config and redeploy.")
+		h.postComment(repo, pr, installationID, templates.RenderRepositoryNotRegistered())
 		h.writeJSON(w, http.StatusOK, map[string]string{
 			"message": "repository not registered",
 		})
@@ -123,17 +122,11 @@ func (h *Handler) handleIssueComment(w http.ResponseWriter, body []byte) {
 		}
 		if result.Action == action.Rollback {
 			if result.ApplyID == "" {
-				h.postComment(repo, pr, installationID,
-					"## Missing Arguments\n\n"+
-						"Usage: `schemabot rollback <apply-id> -e <environment>`\n\n"+
-						"Rollback requires both an apply ID and the `-e` flag to select the target environment.")
+				h.postComment(repo, pr, installationID, templates.RenderRollbackMissingArguments())
 				h.writeJSON(w, http.StatusOK, map[string]string{"message": "missing rollback arguments"})
 				return
 			}
-			h.postComment(repo, pr, installationID,
-				"## Missing Environment\n\n"+
-					"Usage: `schemabot rollback <apply-id> -e <environment>`\n\n"+
-					"The `-e` flag is required to select the target environment.")
+			h.postComment(repo, pr, installationID, templates.RenderRollbackMissingEnv())
 			h.writeJSON(w, http.StatusOK, map[string]string{"message": "missing environment flag"})
 			return
 		}
@@ -191,8 +184,7 @@ func (h *Handler) handleIssueComment(w http.ResponseWriter, body []byte) {
 
 	// Reject -y/--yes on commands that don't support it
 	if result.Action != action.Apply && parser.autoConfirmRegex.MatchString(payload.Comment.Body) {
-		h.postComment(repo, pr, installationID,
-			fmt.Sprintf("The `-y` flag is not supported for `%s`.", result.Action))
+		h.postComment(repo, pr, installationID, templates.RenderUnsupportedAutoConfirm(result.Action))
 		h.writeJSON(w, http.StatusOK, map[string]string{"message": "unsupported flag"})
 		return
 	}
@@ -238,8 +230,7 @@ func (h *Handler) handleIssueComment(w http.ResponseWriter, body []byte) {
 	// Phase 2 commands — acknowledge but not yet implemented
 	case action.Stop, action.Revert, action.SkipRevert, action.Cutover:
 		h.postComment(repo, pr, installationID,
-			fmt.Sprintf("The `%s` command is not yet available via PR comments. Use the CLI instead:\n```\nschemabot %s -e %s\n```",
-				result.Action, result.Action, result.Environment))
+			templates.RenderCommandNotYetAvailable(result.Action, result.Environment))
 		h.writeJSON(w, http.StatusOK, map[string]string{
 			"message": fmt.Sprintf("%s command not yet implemented", result.Action),
 		})
