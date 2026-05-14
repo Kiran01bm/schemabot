@@ -296,7 +296,7 @@ func (h *Handler) checkPriorEnvViaGitHub(
 		h.logger.Error("failed to create GitHub client for prior env check, blocking apply",
 			"prior_env", priorEnv, "error", err)
 		h.postComment(repo, pr, installationID,
-			fmt.Sprintf("## ❌ Apply Blocked\n\nCould not verify %s status: failed to create GitHub client. Retry the apply command.\n\n_Error: %v_", priorEnv, err))
+			templates.RenderApplyBlockedByPriorEnvCheckError(priorEnv, "create GitHub client", err))
 		return true
 	}
 
@@ -305,7 +305,7 @@ func (h *Handler) checkPriorEnvViaGitHub(
 		h.logger.Error("failed to fetch PR for prior env check, blocking apply",
 			"prior_env", priorEnv, "error", err)
 		h.postComment(repo, pr, installationID,
-			fmt.Sprintf("## ❌ Apply Blocked\n\nCould not verify %s status: failed to fetch PR details. Retry the apply command.\n\n_Error: %v_", priorEnv, err))
+			templates.RenderApplyBlockedByPriorEnvCheckError(priorEnv, "fetch PR details", err))
 		return true
 	}
 
@@ -315,7 +315,7 @@ func (h *Handler) checkPriorEnvViaGitHub(
 		h.logger.Error("failed to query GitHub check for prior environment, blocking apply",
 			"prior_env", priorEnv, "check_name", checkName, "error", err)
 		h.postComment(repo, pr, installationID,
-			fmt.Sprintf("## ❌ Apply Blocked\n\nCould not verify %s status: failed to query check runs. Retry the apply command.\n\n_Error: %v_", priorEnv, err))
+			templates.RenderApplyBlockedByPriorEnvCheckError(priorEnv, "query check runs", err))
 		return true
 	}
 

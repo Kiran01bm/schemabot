@@ -383,6 +383,44 @@ func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
 	})
 }
 
+func TestRenderApplyBlockedByPriorEnvCheckError(t *testing.T) {
+	t.Run("renders reason and wrapped error verbatim", func(t *testing.T) {
+		err := errors.New("404 Not Found")
+
+		result := RenderApplyBlockedByPriorEnvCheckError("staging", "fetch PR details", err)
+
+		assert.Contains(t, result, "## ❌ Apply Blocked")
+		assert.Contains(t, result, "Could not verify staging status: failed to fetch PR details. Retry the apply command.")
+		assert.Contains(t, result, "_Error: 404 Not Found_")
+	})
+
+	t.Run("each reason variant produces matching body", func(t *testing.T) {
+		err := errors.New("boom")
+
+		for _, reason := range []string{"create GitHub client", "fetch PR details", "query check runs"} {
+			result := RenderApplyBlockedByPriorEnvCheckError("production", reason, err)
+			assert.Contains(t, result, "Could not verify production status: failed to "+reason+". Retry the apply command.")
+		}
+	})
+
+	t.Run("nil error renders <nil>", func(t *testing.T) {
+		result := RenderApplyBlockedByPriorEnvCheckError("staging", "query check runs", nil)
+
+		assert.Contains(t, result, "## ❌ Apply Blocked")
+		assert.Contains(t, result, "_Error: <nil>_")
+	})
+
+	t.Run("output matches prior inline rendering byte-for-byte", func(t *testing.T) {
+		err := errors.New("rate limited")
+		priorEnv := "staging"
+		reason := "create GitHub client"
+
+		expected := "## ❌ Apply Blocked\n\nCould not verify " + priorEnv + " status: failed to " + reason + ". Retry the apply command.\n\n_Error: " + err.Error() + "_"
+
+		assert.Equal(t, expected, RenderApplyBlockedByPriorEnvCheckError(priorEnv, reason, err))
+	})
+}
+
 func TestRenderApplyBlockedByInProgressChecks(t *testing.T) {
 	inProgress := []BlockingCheck{
 		{Name: "CI / unit-tests", State: "in_progress"},

@@ -304,6 +304,20 @@ func RenderApplyBlockedByInProgressChecks(environment string, inProgress []Block
 	return sb.String()
 }
 
+// RenderApplyBlockedByPriorEnvCheckError renders a comment when apply is blocked
+// because the GitHub API returned an error while verifying a prior environment's
+// aggregate check status. Reason describes the operation that failed (e.g.
+// "create GitHub client", "fetch PR details", "query check runs").
+func RenderApplyBlockedByPriorEnvCheckError(priorEnv, reason string, err error) string {
+	var sb strings.Builder
+
+	sb.WriteString("## ❌ Apply Blocked\n\n")
+	fmt.Fprintf(&sb, "Could not verify %s status: failed to %s. Retry the apply command.\n\n", priorEnv, reason)
+	fmt.Fprintf(&sb, "_Error: %v_", err)
+
+	return sb.String()
+}
+
 // RenderApplyBlockedByPriorEnvInProgress renders a comment when an apply is blocked
 // because a prior environment's apply is currently running.
 func RenderApplyBlockedByPriorEnvInProgress(database, environment, priorEnv string) string {
