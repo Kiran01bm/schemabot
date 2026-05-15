@@ -42,3 +42,6 @@ jobs:
         with:
           version: v2.11.4
           args: ${{ matrix.args }}
+      - name: webhookheaders analyzer
+        if: matrix.name == 'default'
+        run: make check-webhookheaders

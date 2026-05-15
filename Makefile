@@ -123,7 +123,7 @@ help: ## Show this help message
 	@echo "$$HELP_HEADER"
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-lint: check-closeandlog ## Run all linters (golangci-lint + closeandlog)
+lint: check-closeandlog check-webhookheaders ## Run all linters (golangci-lint + custom analyzers)
 	@echo "Running golangci-lint..."
 	@docker run --rm -v $$(pwd):/app -w /app golangci/golangci-lint:latest golangci-lint run --timeout=5m
 
@@ -131,6 +131,10 @@ check-closeandlog: ## Run closeandlog analyzer (flags _ = x.Close() patterns)
 	@echo "Running closeandlog analyzer..."
 	@go run ./cmd/closeandlog-check ./...
 	@go run -tags=integration ./cmd/closeandlog-check ./...
+
+check-webhookheaders: ## Run webhookheaders analyzer (flags inline `## ...` markdown headers in pkg/webhook handlers)
+	@echo "Running webhookheaders analyzer..."
+	@go run ./cmd/webhookheaders-check $$(go list ./pkg/webhook/... | grep -v '/templates$$')
 
 lint-fix: ## Run golangci-lint with auto-fix enabled
 	@echo "Running golangci-lint with auto-fix..."
