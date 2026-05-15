@@ -357,8 +357,8 @@ func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
 		assert.Contains(t, result, "**Environment**: `staging`")
 		assert.Contains(t, result, "Unable to verify PR check statuses")
 		assert.Contains(t, result, "graphql query failed: 500 Internal Server Error")
-		assert.Contains(t, result, "Resolve the issue and retry:")
-		assert.Contains(t, result, "schemabot apply -e staging")
+		assert.Contains(t, result, "Resolve the issue and retry:\n```\nschemabot apply -e staging\n```",
+			"retry command must be inside a fenced code block immediately after the retry copy")
 	})
 
 	t.Run("permission error surfaces a targeted hint with retry block", func(t *testing.T) {
@@ -370,8 +370,8 @@ func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
 		assert.Contains(t, result, "**Environment**: `production`")
 		assert.Contains(t, result, "does not have permission to read check statuses")
 		assert.Contains(t, result, "**Commit statuses: Read**")
-		assert.Contains(t, result, "permission, then retry:")
-		assert.Contains(t, result, "schemabot apply -e production")
+		assert.Contains(t, result, "permission, then retry:\n```\nschemabot apply -e production\n```",
+			"retry command must be inside a fenced code block immediately after the retry copy")
 		assert.NotContains(t, result, "Unable to verify PR check statuses",
 			"permission branch should replace the generic verbatim message")
 		assert.NotContains(t, result, "Resolve the issue and retry:",
@@ -384,8 +384,8 @@ func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
 		assert.Contains(t, result, "## ❌ Apply Blocked")
 		assert.Contains(t, result, "**Environment**: `staging`")
 		assert.Contains(t, result, "Unable to verify PR check statuses.")
-		assert.Contains(t, result, "Retry:")
-		assert.Contains(t, result, "schemabot apply -e staging")
+		assert.Contains(t, result, "Retry:\n```\nschemabot apply -e staging\n```",
+			"retry command must be inside a fenced code block immediately after the retry copy")
 		assert.NotContains(t, result, "```\n```",
 			"nil-error branch should not emit an empty fenced code block")
 		assert.NotContains(t, result, "Resolve the issue and retry:",
