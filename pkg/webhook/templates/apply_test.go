@@ -348,7 +348,7 @@ func TestRenderApplyBlockedByFailingChecks_SingleCheck(t *testing.T) {
 }
 
 func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
-	t.Run("generic error is shown verbatim", func(t *testing.T) {
+	t.Run("generic error is shown verbatim with retry block", func(t *testing.T) {
 		err := errors.New("graphql query failed: 500 Internal Server Error")
 
 		result := RenderApplyBlockedByCheckStatusError("staging", err)
@@ -357,11 +357,11 @@ func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
 		assert.Contains(t, result, "**Environment**: `staging`")
 		assert.Contains(t, result, "Unable to verify PR check statuses")
 		assert.Contains(t, result, "graphql query failed: 500 Internal Server Error")
-		assert.NotContains(t, result, "schemabot apply -e",
-			"API-error variant does not include a retry instruction")
+		assert.Contains(t, result, "Resolve the issue and retry:")
+		assert.Contains(t, result, "schemabot apply -e staging")
 	})
 
-	t.Run("permission error surfaces a targeted hint", func(t *testing.T) {
+	t.Run("permission error surfaces a targeted hint with retry block", func(t *testing.T) {
 		err := errors.New("GET https://api.github.com/...: 403 Resource not accessible by integration")
 
 		result := RenderApplyBlockedByCheckStatusError("production", err)
@@ -370,16 +370,22 @@ func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
 		assert.Contains(t, result, "**Environment**: `production`")
 		assert.Contains(t, result, "does not have permission to read check statuses")
 		assert.Contains(t, result, "**Commit statuses: Read**")
+		assert.Contains(t, result, "permission, then retry:")
+		assert.Contains(t, result, "schemabot apply -e production")
 		assert.NotContains(t, result, "Unable to verify PR check statuses",
 			"permission branch should replace the generic verbatim message")
+		assert.NotContains(t, result, "Resolve the issue and retry:",
+			"permission branch should not also emit the generic-branch retry copy")
 	})
 
-	t.Run("nil error renders without panicking", func(t *testing.T) {
+	t.Run("nil error renders without panicking and includes retry block", func(t *testing.T) {
 		result := RenderApplyBlockedByCheckStatusError("staging", nil)
 
 		assert.Contains(t, result, "## ❌ Apply Blocked")
 		assert.Contains(t, result, "**Environment**: `staging`")
 		assert.Contains(t, result, "Unable to verify PR check statuses")
+		assert.Contains(t, result, "Resolve the issue and retry:")
+		assert.Contains(t, result, "schemabot apply -e staging")
 	})
 }
 

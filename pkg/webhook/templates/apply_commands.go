@@ -262,7 +262,8 @@ func RenderApplyBlockedByFailingChecks(environment string, failing []BlockingChe
 // RenderApplyBlockedByCheckStatusError renders a comment when apply is blocked
 // because the GitHub API returned an error while fetching PR check statuses.
 // The function recognises the "Resource not accessible" permission error and
-// surfaces a targeted hint; all other errors are shown verbatim.
+// surfaces a targeted hint; all other errors are shown verbatim. Both branches
+// include a fenced retry command, matching the failing/in-progress siblings.
 func RenderApplyBlockedByCheckStatusError(environment string, err error) string {
 	var sb strings.Builder
 
@@ -271,7 +272,8 @@ func RenderApplyBlockedByCheckStatusError(environment string, err error) string 
 
 	if err != nil && strings.Contains(err.Error(), "Resource not accessible") {
 		sb.WriteString("The SchemaBot GitHub App does not have permission to read check statuses on this repository. ")
-		sb.WriteString("Grant the app **Commit statuses: Read** permission, then retry.\n")
+		sb.WriteString("Grant the app **Commit statuses: Read** permission, then retry:\n")
+		fmt.Fprintf(&sb, "```\nschemabot apply -e %s\n```\n", environment)
 		return sb.String()
 	}
 
@@ -281,6 +283,8 @@ func RenderApplyBlockedByCheckStatusError(environment string, err error) string 
 		fmt.Fprintf(&sb, "%s\n", err)
 	}
 	sb.WriteString("```\n")
+	sb.WriteString("\nResolve the issue and retry:\n")
+	fmt.Fprintf(&sb, "```\nschemabot apply -e %s\n```\n", environment)
 
 	return sb.String()
 }
