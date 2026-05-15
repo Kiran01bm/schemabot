@@ -1,12 +1,14 @@
 // Package webhookheaders provides a go/analysis analyzer that flags inline
-// markdown header strings (`## ...`) in Go source files. The project
+// markdown header strings (`## ...`) in webhook handler code. The project
 // convention is for all PR-comment markdown to live in pkg/webhook/templates/
-// and be rendered through a templates.Render… helper, so handler code that
-// embeds a `## ...` header is almost always a missed extraction.
+// and be rendered through a templates.Render… helper; a `## ...` literal in
+// handler code is almost always a missed extraction.
 //
-// The analyzer itself is generic — it does not know about pkg/webhook. The
-// caller (Makefile / CI / pre-commit script) is responsible for invoking it
-// only against the packages where the rule should apply.
+// The analyzer reports on every matching string literal in every package it
+// is invoked against — it does not filter by import path. Callers (Makefile,
+// CI, pre-commit script) are responsible for passing only the package set
+// where the rule should apply: today, ./pkg/webhook/... excluding
+// ./pkg/webhook/templates.
 package webhookheaders
 
 import (

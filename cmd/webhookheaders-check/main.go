@@ -5,9 +5,9 @@
 //
 //	go run ./cmd/webhookheaders-check ./pkg/webhook/...
 //
-// The analyzer itself is generic — it does not know about pkg/webhook. The
-// caller must pass the package set the rule should apply to (typically the
-// webhook handler packages, excluding pkg/webhook/templates).
+// The analyzer reports on every package it is given. The caller is
+// responsible for excluding ./pkg/webhook/templates (the templates package
+// is the legitimate home for `## ...` header strings).
 package main
 
 import (
