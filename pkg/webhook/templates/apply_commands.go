@@ -277,13 +277,19 @@ func RenderApplyBlockedByCheckStatusError(environment string, err error) string 
 		return sb.String()
 	}
 
-	sb.WriteString("Unable to verify PR check statuses:\n\n")
-	sb.WriteString("```\n")
 	if err != nil {
+		sb.WriteString("Unable to verify PR check statuses:\n\n")
+		sb.WriteString("```\n")
 		fmt.Fprintf(&sb, "%s\n", err)
+		sb.WriteString("```\n")
+		sb.WriteString("\nResolve the issue and retry:\n")
+	} else {
+		// Defensive: callers should always pass a non-nil error here, but
+		// rendering an empty fenced block followed by "Resolve the issue"
+		// would be confusing if a nil error ever slipped through.
+		sb.WriteString("Unable to verify PR check statuses.\n\n")
+		sb.WriteString("Retry:\n")
 	}
-	sb.WriteString("```\n")
-	sb.WriteString("\nResolve the issue and retry:\n")
 	fmt.Fprintf(&sb, "```\nschemabot apply -e %s\n```\n", environment)
 
 	return sb.String()

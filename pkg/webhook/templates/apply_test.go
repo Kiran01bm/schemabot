@@ -378,14 +378,18 @@ func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
 			"permission branch should not also emit the generic-branch retry copy")
 	})
 
-	t.Run("nil error renders without panicking and includes retry block", func(t *testing.T) {
+	t.Run("nil error skips empty fence and uses concise retry copy", func(t *testing.T) {
 		result := RenderApplyBlockedByCheckStatusError("staging", nil)
 
 		assert.Contains(t, result, "## ❌ Apply Blocked")
 		assert.Contains(t, result, "**Environment**: `staging`")
-		assert.Contains(t, result, "Unable to verify PR check statuses")
-		assert.Contains(t, result, "Resolve the issue and retry:")
+		assert.Contains(t, result, "Unable to verify PR check statuses.")
+		assert.Contains(t, result, "Retry:")
 		assert.Contains(t, result, "schemabot apply -e staging")
+		assert.NotContains(t, result, "```\n```",
+			"nil-error branch should not emit an empty fenced code block")
+		assert.NotContains(t, result, "Resolve the issue and retry:",
+			"nil-error branch should not reference an issue that was not surfaced")
 	})
 }
 
