@@ -148,12 +148,19 @@ fi
 if [ -n "$PKG_FILES" ]; then
     WEBHOOK_FILES=$(echo "$PKG_FILES" | grep '^pkg/webhook/' | grep -v '^pkg/webhook/templates/' || true)
     if [ -n "$WEBHOOK_FILES" ]; then
-        echo "Running webhookheaders analyzer..."
-        WEBHOOK_PKGS=$(go list ./pkg/webhook/... | grep -v '/templates$')
-        if ! go run ./cmd/webhookheaders-check $WEBHOOK_PKGS 2>&1; then
-            echo ""
-            echo 'webhookheaders: move the `## ...` body into pkg/webhook/templates/ and render it via a templates.Render… helper.'
-            exit 1
+        # `grep -v` exits non-zero (and would trip `set -e`) when every package
+        # is filtered out, so suppress that exit and fall through to a clear
+        # message instead of dying silently.
+        WEBHOOK_PKGS=$(go list ./pkg/webhook/... | grep -v '/templates$' || true)
+        if [ -z "$WEBHOOK_PKGS" ]; then
+            echo "webhookheaders: no packages to check (only pkg/webhook/templates exists), skipping."
+        else
+            echo "Running webhookheaders analyzer..."
+            if ! go run ./cmd/webhookheaders-check $WEBHOOK_PKGS 2>&1; then
+                echo ""
+                echo 'webhookheaders: move the `## ...` body into pkg/webhook/templates/ and render it via a templates.Render… helper.'
+                exit 1
+            fi
         fi
     fi
 fi
