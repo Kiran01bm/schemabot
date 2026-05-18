@@ -7,10 +7,11 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// DefaultCheckStatusCacheTTL is the default TTL used when Client constructs
-// its CheckStatusCache. 30s is long enough to absorb webhook retries and
-// tight command bursts targeting the same (repo, sha), but short enough that
-// staleness is irrelevant for human-paced PR comment flows.
+// DefaultCheckStatusCacheTTL is the default TTL used when ForInstallation
+// constructs a per-InstallationClient CheckStatusCache. 30s is long enough
+// to absorb tight command bursts targeting the same (repo, sha) within a
+// single InstallationClient's lifetime, but short enough that staleness is
+// irrelevant for human-paced PR comment flows.
 const DefaultCheckStatusCacheTTL = 30 * time.Second
 
 // CheckStatusCache memoises GetPRCheckStatuses results keyed by (repo, sha)
@@ -18,6 +19,11 @@ const DefaultCheckStatusCacheTTL = 30 * time.Second
 // single upstream request via singleflight. Errors are not cached — each
 // failure re-attempts fresh so transient GitHub outages do not pin a bad
 // state for the TTL window.
+//
+// One cache is owned per InstallationClient (not shared across the Client
+// factory) so cached entries are pinned to the appSlug snapshot the owning
+// client was constructed with — IsSchemaBot can be baked in at fetch time
+// without later skew from cross-instance slug recovery.
 type CheckStatusCache struct {
 	ttl   time.Duration
 	mu    sync.RWMutex

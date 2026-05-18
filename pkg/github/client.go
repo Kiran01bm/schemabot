@@ -28,12 +28,11 @@ type GitHubClientFactory interface {
 
 // Client handles GitHub App-level operations and creates per-installation clients.
 type Client struct {
-	appID            int64
-	privateKey       []byte
-	logger           *slog.Logger
-	appSlug          string            // fetched from GitHub API at startup, used to identify own check runs
-	lastSlugAttempt  time.Time         // rate-limits slug fetch retries
-	checkStatusCache *CheckStatusCache // shared across every InstallationClient this factory produces
+	appID           int64
+	privateKey      []byte
+	logger          *slog.Logger
+	appSlug         string    // fetched from GitHub API at startup, used to identify own check runs
+	lastSlugAttempt time.Time // rate-limits slug fetch retries
 }
 
 // slugFetchRetryCooldown is how long to wait between retry attempts when the
@@ -45,10 +44,9 @@ const slugFetchRetryCooldown = 5 * time.Second
 // PR applies are blocked by the check gate since we can't identify our own checks.
 func NewClient(appID int64, privateKey []byte, logger *slog.Logger) *Client {
 	c := &Client{
-		appID:            appID,
-		privateKey:       privateKey,
-		logger:           logger,
-		checkStatusCache: NewCheckStatusCache(DefaultCheckStatusCacheTTL),
+		appID:      appID,
+		privateKey: privateKey,
+		logger:     logger,
 	}
 
 	// Fetch the app slug so we can identify our own check runs in statusCheckRollup.
@@ -106,7 +104,7 @@ func (c *Client) ForInstallation(installationID int64) (*InstallationClient, err
 		gql:              githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
 		logger:           c.logger,
 		appSlug:          c.appSlug,
-		checkStatusCache: c.checkStatusCache,
+		checkStatusCache: NewCheckStatusCache(DefaultCheckStatusCacheTTL),
 	}, nil
 }
 
@@ -137,11 +135,16 @@ func graphQLURLFor(client *gh.Client) string {
 
 // InstallationClient wraps a go-github client scoped to a specific GitHub App installation.
 type InstallationClient struct {
-	client           *gh.Client
-	gql              *githubv4.Client
-	logger           *slog.Logger
-	appSlug          string            // the app's slug, used to identify own check runs
-	checkStatusCache *CheckStatusCache // optional; when nil, GetPRCheckStatuses bypasses caching (e.g. tests)
+	client  *gh.Client
+	gql     *githubv4.Client
+	logger  *slog.Logger
+	appSlug string // the app's slug, used to identify own check runs
+	// checkStatusCache is owned by this InstallationClient and not shared
+	// across the Client factory. This keeps cache entries pinned to the
+	// appSlug snapshot the client was constructed with so IsSchemaBot is
+	// always consistent with the slug used at fetch time.
+	// Optional: when nil, GetPRCheckStatuses bypasses caching (e.g. tests).
+	checkStatusCache *CheckStatusCache
 }
 
 // IsNotFoundError checks if an error is a GitHub API 404 Not Found error.
@@ -448,9 +451,9 @@ func (ic *InstallationClient) isOwnAppSlug(slug string) bool {
 // results in a single round trip. SchemaBot's own check runs are identified via
 // the GitHub App slug (more reliable than name matching).
 //
-// Results are served from a short-lived per-(repo, ref) cache when one is
-// configured on the client, so concurrent webhook deliveries and tight
-// command bursts collapse to a single upstream GraphQL request.
+// Results are served from a short-lived per-(repo, ref) cache owned by this
+// InstallationClient when one is configured, so repeated calls within the
+// same handler invocation collapse to a single upstream GraphQL request.
 func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo string, ref string) ([]PRCheckStatus, error) {
 	if ic.checkStatusCache == nil {
 		return ic.fetchPRCheckStatuses(ctx, repo, ref)
