@@ -224,6 +224,63 @@ func TestCheckStatusCache_WaiterRespectsItsOwnContext(t *testing.T) {
 	assert.Equal(t, int32(1), calls.Load(), "fetch should still be invoked exactly once")
 }
 
+// cacheLen returns the current size of the cache map under the lock.
+func cacheLen(c *CheckStatusCache) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.m)
+}
+
+func TestCheckStatusCache_StoreEvictsExpiredEntries(t *testing.T) {
+	clock := newFakeClock()
+	c := NewCheckStatusCache(time.Minute)
+	c.now = clock.Now
+
+	fetch := func() ([]PRCheckStatus, error) {
+		return []PRCheckStatus{{Name: "ci/lint"}}, nil
+	}
+
+	// Seed five distinct (repo, sha) entries.
+	for i := range 5 {
+		_, err := c.Do(t.Context(), "octo/repo", "sha-"+string(rune('a'+i)), fetch)
+		require.NoError(t, err)
+	}
+	require.Equal(t, 5, cacheLen(c), "all five fresh entries should be cached")
+
+	// Advance past the TTL — all five are now expired but still in the map.
+	clock.Advance(time.Minute + time.Second)
+
+	// A single store should sweep every expired entry before inserting,
+	// keeping the map bounded by the active working set within the TTL.
+	_, err := c.Do(t.Context(), "octo/repo", "sha-new", fetch)
+	require.NoError(t, err)
+	assert.Equal(t, 1, cacheLen(c), "store should sweep expired entries so the map holds only the live ones")
+}
+
+func TestCheckStatusCache_LookupEvictsExpiredEntry(t *testing.T) {
+	clock := newFakeClock()
+	c := NewCheckStatusCache(time.Minute)
+	c.now = clock.Now
+
+	fetch := func() ([]PRCheckStatus, error) {
+		return []PRCheckStatus{{Name: "ci/lint"}}, nil
+	}
+
+	// Seed one entry, then expire it without ever writing again.
+	_, err := c.Do(t.Context(), "octo/repo", "abc", fetch)
+	require.NoError(t, err)
+	require.Equal(t, 1, cacheLen(c))
+
+	clock.Advance(time.Minute + time.Second)
+
+	// Lookup it directly (do not go through Do, which would re-fetch and
+	// re-store). The expired entry must be evicted so it does not occupy
+	// memory forever for a key that is never written again.
+	_, ok := c.lookup("octo/repo@abc")
+	assert.False(t, ok, "expired entry must be reported as a miss")
+	assert.Equal(t, 0, cacheLen(c), "lookup must evict the expired entry")
+}
+
 func TestCheckStatusCache_NonPositiveTTLDisablesCaching(t *testing.T) {
 	c := NewCheckStatusCache(0)
 

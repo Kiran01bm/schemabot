@@ -103,6 +103,14 @@ func (c *CheckStatusCache) lookup(key string) ([]PRCheckStatus, bool) {
 		return nil, false
 	}
 	if c.now().Sub(entry.fetched) >= c.ttl {
+		// Opportunistically evict on read so a key that is repeatedly
+		// looked up after expiry does not occupy memory until something
+		// happens to write to it.
+		c.mu.Lock()
+		if cur, stillThere := c.m[key]; stillThere && c.now().Sub(cur.fetched) >= c.ttl {
+			delete(c.m, key)
+		}
+		c.mu.Unlock()
 		return nil, false
 	}
 	return entry.statuses, true
@@ -110,6 +118,17 @@ func (c *CheckStatusCache) lookup(key string) ([]PRCheckStatus, bool) {
 
 func (c *CheckStatusCache) store(key string, statuses []PRCheckStatus) {
 	c.mu.Lock()
-	c.m[key] = checkStatusCacheEntry{statuses: statuses, fetched: c.now()}
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	// Sweep expired entries so the map stays bounded by the active
+	// working set within the TTL window, not the total distinct keys
+	// ever seen. Keys that are written once and never looked up again
+	// (e.g. a PR's old head SHA after a force-push) would otherwise
+	// occupy memory for the lifetime of the InstallationClient.
+	now := c.now()
+	for k, entry := range c.m {
+		if now.Sub(entry.fetched) >= c.ttl {
+			delete(c.m, k)
+		}
+	}
+	c.m[key] = checkStatusCacheEntry{statuses: statuses, fetched: now}
 }
