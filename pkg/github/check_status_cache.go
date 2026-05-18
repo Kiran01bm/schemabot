@@ -8,23 +8,40 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// DefaultCheckStatusCacheTTL is the default TTL used when ForInstallation
-// constructs a per-InstallationClient CheckStatusCache. 30s is long enough
-// to absorb tight command bursts targeting the same (repo, sha) within a
-// single InstallationClient's lifetime, but short enough that staleness is
-// irrelevant for human-paced PR comment flows.
+// DefaultCheckStatusCacheTTL is the default TTL used when NewClient
+// constructs the shared CheckStatusCache. 30s is long enough to absorb
+// webhook retries and tight back-to-back command bursts targeting the
+// same (repo, sha), but short enough that staleness is irrelevant for
+// human-paced PR comment flows.
 const DefaultCheckStatusCacheTTL = 30 * time.Second
 
-// CheckStatusCache memoises GetPRCheckStatuses results keyed by (repo, sha)
+// CachedCheckRow is the identity-independent slice of statusCheckRollup
+// data the cache stores. It deliberately omits IsSchemaBot because that
+// is derived from the calling InstallationClient's appSlug, which is
+// resolved at construction time and may differ across the short-lived
+// InstallationClients that share this cache (e.g. when the slug was
+// unavailable at startup and later recovered). The owning
+// InstallationClient projects to PRCheckStatus on every read.
+type CachedCheckRow struct {
+	Name       string
+	Status     string
+	Conclusion string
+	AppSlug    string // empty for legacy commit statuses (StatusContext nodes have no App)
+}
+
+// CheckStatusCache memoises raw statusCheckRollup rows keyed by (repo, sha)
 // with a fixed TTL. Concurrent fetches for the same key collapse into a
 // single upstream request via singleflight. Errors are not cached — each
 // failure re-attempts fresh so transient GitHub outages do not pin a bad
 // state for the TTL window.
 //
-// One cache is owned per InstallationClient (not shared across the Client
-// factory) so cached entries are pinned to the appSlug snapshot the owning
-// client was constructed with — IsSchemaBot can be baked in at fetch time
-// without later skew from cross-instance slug recovery.
+// One cache is owned by the Client factory and shared across every
+// InstallationClient it produces, so cache hits actually accrue across
+// the short-lived InstallationClients spawned per webhook delivery —
+// which is the dedup pattern that justifies the cache. Identity-dependent
+// classification (IsSchemaBot) is re-derived per call by the reading
+// InstallationClient, so a cached entry populated when the app slug was
+// unavailable correctly reclassifies once the slug is recovered.
 type CheckStatusCache struct {
 	ttl   time.Duration
 	mu    sync.RWMutex
@@ -34,8 +51,8 @@ type CheckStatusCache struct {
 }
 
 type checkStatusCacheEntry struct {
-	statuses []PRCheckStatus
-	fetched  time.Time
+	rows    []CachedCheckRow
+	fetched time.Time
 }
 
 // NewCheckStatusCache constructs a cache with the given TTL. A non-positive
@@ -48,7 +65,7 @@ func NewCheckStatusCache(ttl time.Duration) *CheckStatusCache {
 	}
 }
 
-// Do returns the cached statuses for (repo, sha) if a fresh entry exists,
+// Do returns the cached rows for (repo, sha) if a fresh entry exists,
 // otherwise invokes fetch and stores its result. Concurrent callers for the
 // same (repo, sha) collapse into a single fetch invocation.
 //
@@ -59,29 +76,29 @@ func NewCheckStatusCache(ttl time.Duration) *CheckStatusCache {
 //
 // When the cache's TTL is non-positive, fetch is invoked on every call and
 // no result is stored.
-func (c *CheckStatusCache) Do(ctx context.Context, repo, sha string, fetch func() ([]PRCheckStatus, error)) ([]PRCheckStatus, error) {
+func (c *CheckStatusCache) Do(ctx context.Context, repo, sha string, fetch func() ([]CachedCheckRow, error)) ([]CachedCheckRow, error) {
 	if c.ttl <= 0 {
 		return fetch()
 	}
 
 	key := repo + "@" + sha
 
-	if statuses, ok := c.lookup(key); ok {
-		return statuses, nil
+	if rows, ok := c.lookup(key); ok {
+		return rows, nil
 	}
 
 	ch := c.group.DoChan(key, func() (any, error) {
 		// Re-check inside the single-flight critical section: a concurrent
 		// caller may have populated the entry between our miss and here.
-		if statuses, ok := c.lookup(key); ok {
-			return statuses, nil
+		if rows, ok := c.lookup(key); ok {
+			return rows, nil
 		}
-		statuses, err := fetch()
+		rows, err := fetch()
 		if err != nil {
 			return nil, err
 		}
-		c.store(key, statuses)
-		return statuses, nil
+		c.store(key, rows)
+		return rows, nil
 	})
 
 	select {
@@ -89,13 +106,13 @@ func (c *CheckStatusCache) Do(ctx context.Context, repo, sha string, fetch func(
 		if res.Err != nil {
 			return nil, res.Err
 		}
-		return res.Val.([]PRCheckStatus), nil
+		return res.Val.([]CachedCheckRow), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-func (c *CheckStatusCache) lookup(key string) ([]PRCheckStatus, bool) {
+func (c *CheckStatusCache) lookup(key string) ([]CachedCheckRow, bool) {
 	c.mu.RLock()
 	entry, ok := c.m[key]
 	c.mu.RUnlock()
@@ -113,22 +130,22 @@ func (c *CheckStatusCache) lookup(key string) ([]PRCheckStatus, bool) {
 		c.mu.Unlock()
 		return nil, false
 	}
-	return entry.statuses, true
+	return entry.rows, true
 }
 
-func (c *CheckStatusCache) store(key string, statuses []PRCheckStatus) {
+func (c *CheckStatusCache) store(key string, rows []CachedCheckRow) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// Sweep expired entries so the map stays bounded by the active
 	// working set within the TTL window, not the total distinct keys
 	// ever seen. Keys that are written once and never looked up again
 	// (e.g. a PR's old head SHA after a force-push) would otherwise
-	// occupy memory for the lifetime of the InstallationClient.
+	// occupy memory for the lifetime of the process.
 	now := c.now()
 	for k, entry := range c.m {
 		if now.Sub(entry.fetched) >= c.ttl {
 			delete(c.m, k)
 		}
 	}
-	c.m[key] = checkStatusCacheEntry{statuses: statuses, fetched: now}
+	c.m[key] = checkStatusCacheEntry{rows: rows, fetched: now}
 }

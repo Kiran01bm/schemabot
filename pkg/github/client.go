@@ -28,20 +28,20 @@ type GitHubClientFactory interface {
 
 // Client handles GitHub App-level operations and creates per-installation clients.
 type Client struct {
-	appID               int64
-	privateKey          []byte
-	logger              *slog.Logger
-	appSlug             string        // fetched from GitHub API at startup, used to identify own check runs
-	lastSlugAttempt     time.Time     // rate-limits slug fetch retries
-	checkStatusCacheTTL time.Duration // per-InstallationClient cache TTL; <=0 disables caching
+	appID            int64
+	privateKey       []byte
+	logger           *slog.Logger
+	appSlug          string            // fetched from GitHub API at startup, used to identify own check runs
+	lastSlugAttempt  time.Time         // rate-limits slug fetch retries
+	checkStatusCache *CheckStatusCache // shared across every InstallationClient this factory produces
 }
 
 // slugFetchRetryCooldown is how long to wait between retry attempts when the
 // app slug couldn't be fetched at startup (e.g., GitHub was temporarily down).
 const slugFetchRetryCooldown = 5 * time.Second
 
-// NewClient creates a new GitHub App client with the default per-InstallationClient
-// check-status cache TTL. See NewClientWithCacheTTL for tuning or disabling the cache.
+// NewClient creates a new GitHub App client with the default check-status
+// cache TTL. See NewClientWithCacheTTL for tuning or disabling the cache.
 //
 // Fetches the app's slug from GitHub. If the slug can't be fetched (e.g., GitHub
 // is down), the server still starts but PR applies are blocked by the check gate
@@ -52,14 +52,19 @@ func NewClient(appID int64, privateKey []byte, logger *slog.Logger) *Client {
 
 // NewClientWithCacheTTL creates a new GitHub App client with an explicit
 // check-status cache TTL. Pass 0 (or any non-positive duration) to disable
-// the per-InstallationClient cache entirely — every GetPRCheckStatuses call
-// then issues a fresh GraphQL request.
+// the cache entirely — every GetPRCheckStatuses call then issues a fresh
+// GraphQL request.
+//
+// The cache is owned by the Client and shared across every InstallationClient
+// the Client produces, so back-to-back webhook deliveries and command bursts
+// targeting the same (repo, sha) collapse to a single upstream request even
+// though each delivery spawns a fresh InstallationClient.
 func NewClientWithCacheTTL(appID int64, privateKey []byte, logger *slog.Logger, checkStatusCacheTTL time.Duration) *Client {
 	c := &Client{
-		appID:               appID,
-		privateKey:          privateKey,
-		logger:              logger,
-		checkStatusCacheTTL: checkStatusCacheTTL,
+		appID:            appID,
+		privateKey:       privateKey,
+		logger:           logger,
+		checkStatusCache: NewCheckStatusCache(checkStatusCacheTTL),
 	}
 
 	// Fetch the app slug so we can identify our own check runs in statusCheckRollup.
@@ -117,7 +122,7 @@ func (c *Client) ForInstallation(installationID int64) (*InstallationClient, err
 		gql:              githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
 		logger:           c.logger,
 		appSlug:          c.appSlug,
-		checkStatusCache: NewCheckStatusCache(c.checkStatusCacheTTL),
+		checkStatusCache: c.checkStatusCache,
 	}, nil
 }
 
@@ -152,10 +157,13 @@ type InstallationClient struct {
 	gql     *githubv4.Client
 	logger  *slog.Logger
 	appSlug string // the app's slug, used to identify own check runs
-	// checkStatusCache is owned by this InstallationClient and not shared
-	// across the Client factory. This keeps cache entries pinned to the
-	// appSlug snapshot the client was constructed with so IsSchemaBot is
-	// always consistent with the slug used at fetch time.
+	// checkStatusCache is owned by the parent Client factory and shared
+	// across every InstallationClient it produces so cache hits accrue
+	// across the short-lived InstallationClients spawned per webhook
+	// delivery. The cache stores identity-independent rows; IsSchemaBot
+	// is re-derived per call against this client's appSlug snapshot, so
+	// a cached entry populated when the app slug was unavailable
+	// correctly reclassifies once the slug is recovered.
 	// Optional: when nil, GetPRCheckStatuses bypasses caching (e.g. tests).
 	checkStatusCache *CheckStatusCache
 }
@@ -454,8 +462,14 @@ type statusCheckRollupQuery struct {
 	} `graphql:"repository(owner: $owner, name: $repo)"`
 }
 
-// isOwnAppSlug returns true if the given slug belongs to this SchemaBot instance.
+// isOwnAppSlug returns true if the given slug belongs to this SchemaBot
+// instance. An empty slug never matches — both to handle StatusContext rows
+// (which have no App) and to fail closed when ic.appSlug has not yet been
+// fetched, so cached rows are never misclassified as SchemaBot's own.
 func (ic *InstallationClient) isOwnAppSlug(slug string) bool {
+	if slug == "" || ic.appSlug == "" {
+		return false
+	}
 	return strings.EqualFold(slug, ic.appSlug)
 }
 
@@ -464,21 +478,45 @@ func (ic *InstallationClient) isOwnAppSlug(slug string) bool {
 // results in a single round trip. SchemaBot's own check runs are identified via
 // the GitHub App slug (more reliable than name matching).
 //
-// Results are served from a short-lived per-(repo, ref) cache owned by this
-// InstallationClient when one is configured, so repeated calls within the
-// same handler invocation collapse to a single upstream GraphQL request.
+// Results are served from the Client-shared per-(repo, ref) cache when one
+// is configured, so back-to-back webhook deliveries and command bursts
+// targeting the same commit collapse to a single upstream GraphQL request
+// across every InstallationClient spawned in that window. The cache stores
+// identity-independent rows; IsSchemaBot is re-derived per call against
+// this client's appSlug snapshot so a cached entry populated when the slug
+// was unavailable correctly reclassifies once the slug is recovered.
 func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo string, ref string) ([]PRCheckStatus, error) {
+	var (
+		rows []CachedCheckRow
+		err  error
+	)
 	if ic.checkStatusCache == nil {
-		return ic.fetchPRCheckStatuses(ctx, repo, ref)
+		rows, err = ic.fetchPRCheckStatuses(ctx, repo, ref)
+	} else {
+		rows, err = ic.checkStatusCache.Do(ctx, repo, ref, func() ([]CachedCheckRow, error) {
+			return ic.fetchPRCheckStatuses(ctx, repo, ref)
+		})
 	}
-	return ic.checkStatusCache.Do(ctx, repo, ref, func() ([]PRCheckStatus, error) {
-		return ic.fetchPRCheckStatuses(ctx, repo, ref)
-	})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]PRCheckStatus, len(rows))
+	for i, r := range rows {
+		out[i] = PRCheckStatus{
+			Name:        r.Name,
+			Status:      r.Status,
+			Conclusion:  r.Conclusion,
+			IsSchemaBot: ic.isOwnAppSlug(r.AppSlug),
+		}
+	}
+	return out, nil
 }
 
 // fetchPRCheckStatuses performs the actual GraphQL round trip for
-// GetPRCheckStatuses, bypassing the cache.
-func (ic *InstallationClient) fetchPRCheckStatuses(ctx context.Context, repo string, ref string) ([]PRCheckStatus, error) {
+// GetPRCheckStatuses, returning identity-independent rows suitable for
+// caching across InstallationClients with different appSlug snapshots.
+func (ic *InstallationClient) fetchPRCheckStatuses(ctx context.Context, repo string, ref string) ([]CachedCheckRow, error) {
 	owner, repoName := splitRepo(repo)
 
 	vars := map[string]any{
@@ -488,7 +526,7 @@ func (ic *InstallationClient) fetchPRCheckStatuses(ctx context.Context, repo str
 		"after": (*githubv4.String)(nil),
 	}
 
-	var out []PRCheckStatus
+	var out []CachedCheckRow
 	for {
 		var q statusCheckRollupQuery
 		if err := ic.gql.Query(ctx, &q, vars); err != nil {
@@ -498,19 +536,20 @@ func (ic *InstallationClient) fetchPRCheckStatuses(ctx context.Context, repo str
 		for _, n := range contexts.Nodes {
 			switch n.Typename {
 			case "CheckRun":
-				out = append(out, PRCheckStatus{
-					Name:        n.CheckRun.Name,
-					Status:      strings.ToLower(n.CheckRun.Status),
-					Conclusion:  strings.ToLower(n.CheckRun.Conclusion),
-					IsSchemaBot: ic.isOwnAppSlug(n.CheckRun.CheckSuite.App.Slug),
+				out = append(out, CachedCheckRow{
+					Name:       n.CheckRun.Name,
+					Status:     strings.ToLower(n.CheckRun.Status),
+					Conclusion: strings.ToLower(n.CheckRun.Conclusion),
+					AppSlug:    n.CheckRun.CheckSuite.App.Slug,
 				})
 			case "StatusContext":
 				status, conclusion := mapLegacyStatusState(n.StatusContext.State)
-				out = append(out, PRCheckStatus{
-					Name:        n.StatusContext.Context,
-					Status:      status,
-					Conclusion:  conclusion,
-					IsSchemaBot: false, // commit statuses don't have app slugs — never SchemaBot's own
+				out = append(out, CachedCheckRow{
+					Name:       n.StatusContext.Context,
+					Status:     status,
+					Conclusion: conclusion,
+					// AppSlug left empty: commit statuses have no App, so
+					// IsSchemaBot evaluates to false regardless of ic.appSlug.
 				})
 			}
 		}

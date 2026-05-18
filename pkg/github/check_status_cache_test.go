@@ -40,9 +40,9 @@ func TestCheckStatusCache_HitsCacheWithinTTL(t *testing.T) {
 	c.now = clock.Now
 
 	var calls atomic.Int32
-	fetch := func() ([]PRCheckStatus, error) {
+	fetch := func() ([]CachedCheckRow, error) {
 		calls.Add(1)
-		return []PRCheckStatus{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, nil
+		return []CachedCheckRow{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, nil
 	}
 
 	first, err := c.Do(t.Context(), "octo/repo", "abc123", fetch)
@@ -63,9 +63,9 @@ func TestCheckStatusCache_RefetchesAfterTTL(t *testing.T) {
 	c.now = clock.Now
 
 	var calls atomic.Int32
-	fetch := func() ([]PRCheckStatus, error) {
+	fetch := func() ([]CachedCheckRow, error) {
 		calls.Add(1)
-		return []PRCheckStatus{{Name: "ci/lint"}}, nil
+		return []CachedCheckRow{{Name: "ci/lint"}}, nil
 	}
 
 	_, err := c.Do(t.Context(), "octo/repo", "abc123", fetch)
@@ -84,7 +84,7 @@ func TestCheckStatusCache_KeysAreIndependent(t *testing.T) {
 	c.now = newFakeClock().Now
 
 	var calls atomic.Int32
-	fetch := func() ([]PRCheckStatus, error) {
+	fetch := func() ([]CachedCheckRow, error) {
 		calls.Add(1)
 		return nil, nil
 	}
@@ -105,12 +105,12 @@ func TestCheckStatusCache_ErrorsAreNotCached(t *testing.T) {
 
 	var calls atomic.Int32
 	wantErr := errors.New("boom")
-	fetch := func() ([]PRCheckStatus, error) {
+	fetch := func() ([]CachedCheckRow, error) {
 		n := calls.Add(1)
 		if n < 3 {
 			return nil, wantErr
 		}
-		return []PRCheckStatus{{Name: "ci/lint"}}, nil
+		return []CachedCheckRow{{Name: "ci/lint"}}, nil
 	}
 
 	_, err := c.Do(t.Context(), "octo/repo", "abc", fetch)
@@ -120,7 +120,7 @@ func TestCheckStatusCache_ErrorsAreNotCached(t *testing.T) {
 
 	got, err := c.Do(t.Context(), "octo/repo", "abc", fetch)
 	require.NoError(t, err)
-	assert.Equal(t, []PRCheckStatus{{Name: "ci/lint"}}, got)
+	assert.Equal(t, []CachedCheckRow{{Name: "ci/lint"}}, got)
 	assert.Equal(t, int32(3), calls.Load())
 }
 
@@ -131,14 +131,14 @@ func TestCheckStatusCache_SingleFlightCollapsesConcurrentFetches(t *testing.T) {
 	const concurrency = 25
 	var calls atomic.Int32
 	release := make(chan struct{})
-	fetch := func() ([]PRCheckStatus, error) {
+	fetch := func() ([]CachedCheckRow, error) {
 		calls.Add(1)
 		<-release // hold open until all goroutines have joined the flight
-		return []PRCheckStatus{{Name: "ci/lint"}}, nil
+		return []CachedCheckRow{{Name: "ci/lint"}}, nil
 	}
 
 	var wg sync.WaitGroup
-	results := make([][]PRCheckStatus, concurrency)
+	results := make([][]CachedCheckRow, concurrency)
 	errs := make([]error, concurrency)
 	for i := range concurrency {
 		wg.Add(1)
@@ -159,7 +159,7 @@ func TestCheckStatusCache_SingleFlightCollapsesConcurrentFetches(t *testing.T) {
 	assert.Equal(t, int32(1), calls.Load(), "all concurrent callers should collapse to one fetch")
 	for i := range concurrency {
 		require.NoError(t, errs[i])
-		assert.Equal(t, []PRCheckStatus{{Name: "ci/lint"}}, results[i])
+		assert.Equal(t, []CachedCheckRow{{Name: "ci/lint"}}, results[i])
 	}
 }
 
@@ -175,16 +175,16 @@ func TestCheckStatusCache_WaiterRespectsItsOwnContext(t *testing.T) {
 	var calls atomic.Int32
 	fetchEntered := make(chan struct{})
 	releaseFetch := make(chan struct{})
-	fetch := func() ([]PRCheckStatus, error) {
+	fetch := func() ([]CachedCheckRow, error) {
 		calls.Add(1)
 		close(fetchEntered)
 		<-releaseFetch
-		return []PRCheckStatus{{Name: "ci/lint"}}, nil
+		return []CachedCheckRow{{Name: "ci/lint"}}, nil
 	}
 
 	// First caller: long-lived ctx, owns the in-flight fetch.
 	firstDone := make(chan struct{})
-	var firstResult []PRCheckStatus
+	var firstResult []CachedCheckRow
 	var firstErr error
 	go func() {
 		defer close(firstDone)
@@ -220,7 +220,7 @@ func TestCheckStatusCache_WaiterRespectsItsOwnContext(t *testing.T) {
 	close(releaseFetch)
 	<-firstDone
 	require.NoError(t, firstErr)
-	assert.Equal(t, []PRCheckStatus{{Name: "ci/lint"}}, firstResult)
+	assert.Equal(t, []CachedCheckRow{{Name: "ci/lint"}}, firstResult)
 	assert.Equal(t, int32(1), calls.Load(), "fetch should still be invoked exactly once")
 }
 
@@ -236,8 +236,8 @@ func TestCheckStatusCache_StoreEvictsExpiredEntries(t *testing.T) {
 	c := NewCheckStatusCache(time.Minute)
 	c.now = clock.Now
 
-	fetch := func() ([]PRCheckStatus, error) {
-		return []PRCheckStatus{{Name: "ci/lint"}}, nil
+	fetch := func() ([]CachedCheckRow, error) {
+		return []CachedCheckRow{{Name: "ci/lint"}}, nil
 	}
 
 	// Seed five distinct (repo, sha) entries.
@@ -262,8 +262,8 @@ func TestCheckStatusCache_LookupEvictsExpiredEntry(t *testing.T) {
 	c := NewCheckStatusCache(time.Minute)
 	c.now = clock.Now
 
-	fetch := func() ([]PRCheckStatus, error) {
-		return []PRCheckStatus{{Name: "ci/lint"}}, nil
+	fetch := func() ([]CachedCheckRow, error) {
+		return []CachedCheckRow{{Name: "ci/lint"}}, nil
 	}
 
 	// Seed one entry, then expire it without ever writing again.
@@ -281,11 +281,50 @@ func TestCheckStatusCache_LookupEvictsExpiredEntry(t *testing.T) {
 	assert.Equal(t, 0, cacheLen(c), "lookup must evict the expired entry")
 }
 
+// TestGetPRCheckStatuses_RecomputesIsSchemaBotPerCall locks in the invariant
+// that IsSchemaBot is derived from the calling InstallationClient's appSlug
+// at read time, never baked into the shared cache at fetch time. Without
+// this, an entry populated by an InstallationClient whose appSlug was
+// unavailable would keep IsSchemaBot=false for SchemaBot's own checks until
+// the TTL expired — even for subsequent InstallationClients constructed
+// after slug recovery — causing the checks gate to spuriously block applies
+// on the bot's own checks.
+func TestGetPRCheckStatuses_RecomputesIsSchemaBotPerCall(t *testing.T) {
+	cache := NewCheckStatusCache(time.Minute)
+	cache.now = newFakeClock().Now
+
+	// Seed the shared cache with a row whose AppSlug matches the recovered
+	// slug. This simulates a previous fetch populating the cache before
+	// any client knew the slug.
+	const repo, sha = "octo/repo", "abc123"
+	cache.store(repo+"@"+sha, []CachedCheckRow{
+		{Name: "schemabot/apply staging", Status: "completed", Conclusion: "success", AppSlug: "schemabot"},
+		{Name: "ci/lint", Status: "completed", Conclusion: "failure", AppSlug: "other-ci"},
+	})
+
+	// Client A was spawned before slug recovery (ic.appSlug == "").
+	preRecovery := &InstallationClient{appSlug: "", checkStatusCache: cache}
+	// Client B is spawned by the same factory after slug recovery succeeded.
+	postRecovery := &InstallationClient{appSlug: "schemabot", checkStatusCache: cache}
+
+	preStatuses, err := preRecovery.GetPRCheckStatuses(t.Context(), repo, sha)
+	require.NoError(t, err)
+	for _, s := range preStatuses {
+		assert.False(t, s.IsSchemaBot, "pre-recovery client must not classify any row as own check (slug not known) — got %+v", s)
+	}
+
+	postStatuses, err := postRecovery.GetPRCheckStatuses(t.Context(), repo, sha)
+	require.NoError(t, err)
+	require.Len(t, postStatuses, 2)
+	assert.True(t, postStatuses[0].IsSchemaBot, "post-recovery client must re-derive IsSchemaBot=true for the bot's own check from the cached AppSlug")
+	assert.False(t, postStatuses[1].IsSchemaBot, "third-party check must remain IsSchemaBot=false")
+}
+
 func TestCheckStatusCache_NonPositiveTTLDisablesCaching(t *testing.T) {
 	c := NewCheckStatusCache(0)
 
 	var calls atomic.Int32
-	fetch := func() ([]PRCheckStatus, error) {
+	fetch := func() ([]CachedCheckRow, error) {
 		calls.Add(1)
 		return nil, nil
 	}
