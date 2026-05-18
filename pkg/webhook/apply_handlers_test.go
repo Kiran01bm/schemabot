@@ -297,7 +297,8 @@ func TestEnforcePassingChecks(t *testing.T) {
 		case body := <-comments:
 			assert.Contains(t, body, "CI / tests")
 			assert.Contains(t, body, "failure")
-		default:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for failing-checks comment")
 		}
 	})
 
@@ -359,7 +360,8 @@ func TestEnforcePassingChecks(t *testing.T) {
 		select {
 		case body := <-comments:
 			assert.Contains(t, body, "still running")
-		default:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for in-progress-checks comment")
 		}
 	})
 
