@@ -247,6 +247,15 @@ func RenderApplyBlockedByFailingChecks(environment string, failing []BlockingChe
 
 	sb.WriteString("## ❌ Apply Blocked\n\n")
 	fmt.Fprintf(&sb, "**Environment**: `%s`\n\n", environment)
+	if len(failing) == 0 {
+		// Defensive: callers should only invoke this template when at least
+		// one failing check has been identified. Render a generic message
+		// rather than an empty Markdown table with column headers but no rows.
+		sb.WriteString("Cannot apply while PR checks are failing.\n\n")
+		sb.WriteString("Fix the failing checks and retry:\n")
+		fmt.Fprintf(&sb, "```\nschemabot apply -e %s\n```\n", environment)
+		return sb.String()
+	}
 	sb.WriteString("Cannot apply while PR checks are failing:\n\n")
 	sb.WriteString("| Check | Status |\n")
 	sb.WriteString("|-------|--------|\n")
@@ -302,6 +311,15 @@ func RenderApplyBlockedByInProgressChecks(environment string, inProgress []Block
 
 	sb.WriteString("## ⏳ Apply Blocked\n\n")
 	fmt.Fprintf(&sb, "**Environment**: `%s`\n\n", environment)
+	if len(inProgress) == 0 {
+		// Defensive: callers should only invoke this template when at least
+		// one in-progress check has been identified. Render a generic message
+		// rather than an empty Markdown table with column headers but no rows.
+		sb.WriteString("Cannot apply while PR checks are still running.\n\n")
+		sb.WriteString("Wait for checks to complete and retry:\n")
+		fmt.Fprintf(&sb, "```\nschemabot apply -e %s\n```\n", environment)
+		return sb.String()
+	}
 	sb.WriteString("Cannot apply while PR checks are still running:\n\n")
 	sb.WriteString("| Check | Status |\n")
 	sb.WriteString("|-------|--------|\n")

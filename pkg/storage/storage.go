@@ -84,15 +84,15 @@ type CheckStore interface {
 	UpsertPlanResult(ctx context.Context, check *Check) error
 
 	// CompleteForApply updates stored check state to a terminal state only if
-	// it still belongs to the given apply and no newer non-terminal apply exists
-	// for the same PR/environment/database. Returns false when another worker
-	// changed the stored state first.
+	// it still belongs to the given apply and no newer apply exists for the
+	// same PR/environment/database. Returns false when another worker changed
+	// the stored state first.
 	CompleteForApply(ctx context.Context, check *Check, apply *Apply) (bool, error)
 
 	// MarkActionRequiredForApply marks stored check state action_required after
 	// a rollback only if it still belongs to that rollback apply and no newer
-	// non-terminal apply exists for the same PR/environment/database. Returns
-	// false when another worker changed the stored state first.
+	// apply exists for the same PR/environment/database. Returns false when
+	// another worker changed the stored state first.
 	MarkActionRequiredForApply(ctx context.Context, check *Check, apply *Apply) (bool, error)
 
 	// Get returns stored check state by its unique key (PR + env + database), or nil if not found.
@@ -206,9 +206,9 @@ type ApplyStore interface {
 	// If not called for > 1 minute, another worker can claim the apply.
 	Heartbeat(ctx context.Context, applyID int64) error
 
-	// FindMissingSummaryComment returns completed/failed applies that have a
-	// progress comment but no summary comment. Used by the recovery worker on
-	// startup to post missing summary comments after container restarts.
+	// FindMissingSummaryComment returns GitHub-backed applies that should have
+	// a terminal summary comment but only have a progress comment. Used by
+	// startup reconciliation to post missing summary comments after restarts.
 	FindMissingSummaryComment(ctx context.Context) ([]*Apply, error)
 
 	// GetByPR returns all applies for a PR.
