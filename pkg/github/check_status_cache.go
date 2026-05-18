@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -51,9 +52,14 @@ func NewCheckStatusCache(ttl time.Duration) *CheckStatusCache {
 // otherwise invokes fetch and stores its result. Concurrent callers for the
 // same (repo, sha) collapse into a single fetch invocation.
 //
+// Each caller observes its own ctx for cancellation/deadline: a caller whose
+// ctx fires while waiting on another caller's in-flight fetch returns
+// promptly with ctx.Err(), without aborting the shared fetch (other waiters
+// and future callers can still receive its result).
+//
 // When the cache's TTL is non-positive, fetch is invoked on every call and
 // no result is stored.
-func (c *CheckStatusCache) Do(repo, sha string, fetch func() ([]PRCheckStatus, error)) ([]PRCheckStatus, error) {
+func (c *CheckStatusCache) Do(ctx context.Context, repo, sha string, fetch func() ([]PRCheckStatus, error)) ([]PRCheckStatus, error) {
 	if c.ttl <= 0 {
 		return fetch()
 	}
@@ -64,7 +70,7 @@ func (c *CheckStatusCache) Do(repo, sha string, fetch func() ([]PRCheckStatus, e
 		return statuses, nil
 	}
 
-	v, err, _ := c.group.Do(key, func() (any, error) {
+	ch := c.group.DoChan(key, func() (any, error) {
 		// Re-check inside the single-flight critical section: a concurrent
 		// caller may have populated the entry between our miss and here.
 		if statuses, ok := c.lookup(key); ok {
@@ -77,10 +83,16 @@ func (c *CheckStatusCache) Do(repo, sha string, fetch func() ([]PRCheckStatus, e
 		c.store(key, statuses)
 		return statuses, nil
 	})
-	if err != nil {
-		return nil, err
+
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]PRCheckStatus), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return v.([]PRCheckStatus), nil
 }
 
 func (c *CheckStatusCache) lookup(key string) ([]PRCheckStatus, bool) {

@@ -458,7 +458,7 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 	if ic.checkStatusCache == nil {
 		return ic.fetchPRCheckStatuses(ctx, repo, ref)
 	}
-	return ic.checkStatusCache.Do(repo, ref, func() ([]PRCheckStatus, error) {
+	return ic.checkStatusCache.Do(ctx, repo, ref, func() ([]PRCheckStatus, error) {
 		return ic.fetchPRCheckStatuses(ctx, repo, ref)
 	})
 }
