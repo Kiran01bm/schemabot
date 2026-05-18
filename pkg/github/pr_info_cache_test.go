@@ -1,18 +1,15 @@
 package github
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,322 +19,94 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPRInfoCache_HitsCacheWithinTTL(t *testing.T) {
-	clock := newPRInfoFakeClock()
-	c := NewPRInfoCache(time.Minute)
-	c.now = clock.Now
+// TestFetchPullRequest_CacheCollapsesDuplicateCallsWithinScope locks in the
+// request-scoped dedup invariant: every FetchPullRequest call inside a
+// single ctx scope (one WithPRInfoCache wrap) for the same (repo, pr)
+// must hit GitHub exactly once, even when issued through different
+// InstallationClients sharing that ctx.
+func TestFetchPullRequest_CacheCollapsesDuplicateCallsWithinScope(t *testing.T) {
+	server, calls := newPRFakeGitHubServer(t)
+	defer server.Close()
 
-	var calls atomic.Int32
-	fetch := func() (*PullRequestInfo, error) {
-		calls.Add(1)
-		return &PullRequestInfo{HeadSHA: "abc123", User: "octocat"}, nil
-	}
+	ic1 := newPRTestInstallationClient(t, server)
+	ic2 := newPRTestInstallationClient(t, server)
 
-	first, err := c.Do(t.Context(), "octo/repo", 42, fetch)
-	require.NoError(t, err)
-
-	clock.Advance(30 * time.Second) // still inside TTL
-
-	second, err := c.Do(t.Context(), "octo/repo", 42, fetch)
-	require.NoError(t, err)
-
-	assert.Equal(t, *first, *second, "second call should return the cached value")
-	assert.Equal(t, int32(1), calls.Load(), "fetch should be invoked only once within the TTL")
-}
-
-func TestPRInfoCache_RefetchesAfterTTL(t *testing.T) {
-	clock := newPRInfoFakeClock()
-	c := NewPRInfoCache(time.Minute)
-	c.now = clock.Now
-
-	var calls atomic.Int32
-	fetch := func() (*PullRequestInfo, error) {
-		calls.Add(1)
-		return &PullRequestInfo{HeadSHA: "abc123"}, nil
-	}
-
-	_, err := c.Do(t.Context(), "octo/repo", 42, fetch)
-	require.NoError(t, err)
-
-	clock.Advance(time.Minute + time.Second) // outside TTL
-
-	_, err = c.Do(t.Context(), "octo/repo", 42, fetch)
-	require.NoError(t, err)
-
-	assert.Equal(t, int32(2), calls.Load(), "expired entry should trigger a fresh fetch")
-}
-
-func TestPRInfoCache_KeysAreIndependent(t *testing.T) {
-	c := NewPRInfoCache(time.Minute)
-	c.now = newPRInfoFakeClock().Now
-
-	var calls atomic.Int32
-	fetch := func() (*PullRequestInfo, error) {
-		calls.Add(1)
-		return &PullRequestInfo{}, nil
-	}
-
-	_, err := c.Do(t.Context(), "octo/repo", 1, fetch)
-	require.NoError(t, err)
-	_, err = c.Do(t.Context(), "octo/repo", 2, fetch)
-	require.NoError(t, err)
-	_, err = c.Do(t.Context(), "octo/other", 1, fetch)
-	require.NoError(t, err)
-
-	assert.Equal(t, int32(3), calls.Load(), "each unique (repo, pr) should miss the cache")
-}
-
-func TestPRInfoCache_ErrorsAreNotCached(t *testing.T) {
-	c := NewPRInfoCache(time.Minute)
-	c.now = newPRInfoFakeClock().Now
-
-	var calls atomic.Int32
-	wantErr := errors.New("boom")
-	fetch := func() (*PullRequestInfo, error) {
-		n := calls.Add(1)
-		if n < 3 {
-			return nil, wantErr
-		}
-		return &PullRequestInfo{HeadSHA: "abc123"}, nil
-	}
-
-	_, err := c.Do(t.Context(), "octo/repo", 42, fetch)
-	assert.ErrorIs(t, err, wantErr)
-	_, err = c.Do(t.Context(), "octo/repo", 42, fetch)
-	assert.ErrorIs(t, err, wantErr, "second call should also miss and refetch — errors are not cached")
-
-	got, err := c.Do(t.Context(), "octo/repo", 42, fetch)
-	require.NoError(t, err)
-	assert.Equal(t, &PullRequestInfo{HeadSHA: "abc123"}, got)
-	assert.Equal(t, int32(3), calls.Load())
-}
-
-func TestPRInfoCache_SingleFlightCollapsesConcurrentFetches(t *testing.T) {
-	c := NewPRInfoCache(time.Minute)
-	c.now = newPRInfoFakeClock().Now
-
-	const concurrency = 25
-	var calls atomic.Int32
-	release := make(chan struct{})
-	fetch := func() (*PullRequestInfo, error) {
-		calls.Add(1)
-		<-release // hold open until all goroutines have joined the flight
-		return &PullRequestInfo{HeadSHA: "abc123"}, nil
-	}
-
-	var wg sync.WaitGroup
-	results := make([]*PullRequestInfo, concurrency)
-	errs := make([]error, concurrency)
-	for i := range concurrency {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			res, err := c.Do(t.Context(), "octo/repo", 42, fetch)
-			results[i] = res
-			errs[i] = err
-		}(i)
-	}
-
-	// Give all goroutines time to enqueue on the singleflight group, then
-	// release the in-flight fetch.
-	time.Sleep(50 * time.Millisecond)
-	close(release)
-	wg.Wait()
-
-	assert.Equal(t, int32(1), calls.Load(), "all concurrent callers should collapse to one fetch")
-	for i := range concurrency {
-		require.NoError(t, errs[i])
-		require.NotNil(t, results[i])
-		assert.Equal(t, "abc123", results[i].HeadSHA)
-	}
-
-	// Each caller must receive its own pointer — mutating one must not
-	// affect another.
-	results[0].HeadSHA = "mutated"
-	assert.Equal(t, "abc123", results[1].HeadSHA, "callers must receive independent copies")
-}
-
-// TestPRInfoCache_WaiterRespectsItsOwnContext locks in the invariant
-// that a caller waiting on another caller's in-flight singleflight fetch
-// returns promptly when its own ctx is cancelled, rather than blocking
-// until the shared fetch completes. The shared fetch is not aborted —
-// the first caller still receives its result.
-func TestPRInfoCache_WaiterRespectsItsOwnContext(t *testing.T) {
-	c := NewPRInfoCache(time.Minute)
-	c.now = newPRInfoFakeClock().Now
-
-	var calls atomic.Int32
-	fetchEntered := make(chan struct{})
-	releaseFetch := make(chan struct{})
-	fetch := func() (*PullRequestInfo, error) {
-		calls.Add(1)
-		close(fetchEntered)
-		<-releaseFetch
-		return &PullRequestInfo{HeadSHA: "abc123"}, nil
-	}
-
-	// First caller: long-lived ctx, owns the in-flight fetch.
-	firstDone := make(chan struct{})
-	var firstResult *PullRequestInfo
-	var firstErr error
-	go func() {
-		defer close(firstDone)
-		firstResult, firstErr = c.Do(t.Context(), "octo/repo", 42, fetch)
-	}()
-
-	// Wait until the fetch is actually in flight before launching the
-	// second caller, so we know it will join the singleflight group as a
-	// waiter rather than running the fetch itself.
-	<-fetchEntered
-
-	// Second caller: its own cancellable ctx. Cancel before the fetch
-	// completes and assert the caller returns promptly with ctx.Err().
-	secondCtx, secondCancel := context.WithCancel(t.Context())
-	secondDone := make(chan struct{})
-	var secondErr error
-	go func() {
-		defer close(secondDone)
-		_, secondErr = c.Do(secondCtx, "octo/repo", 42, fetch)
-	}()
-	secondCancel()
-
-	select {
-	case <-secondDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("second caller did not return promptly after its ctx was cancelled — likely still blocked on the shared singleflight fetch")
-	}
-	assert.ErrorIs(t, secondErr, context.Canceled, "second caller should return its own ctx.Err()")
-
-	// First caller must still get the shared fetch's result — its ctx is
-	// alive and the second caller's cancellation must not have aborted
-	// the shared fetch.
-	close(releaseFetch)
-	<-firstDone
-	require.NoError(t, firstErr)
-	require.NotNil(t, firstResult)
-	assert.Equal(t, "abc123", firstResult.HeadSHA)
-	assert.Equal(t, int32(1), calls.Load(), "fetch should still be invoked exactly once")
-}
-
-// prInfoCacheLen returns the current size of the cache map under the lock.
-func prInfoCacheLen(c *PRInfoCache) int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.m)
-}
-
-func TestPRInfoCache_StoreEvictsExpiredEntries(t *testing.T) {
-	clock := newPRInfoFakeClock()
-	c := NewPRInfoCache(time.Minute)
-	c.now = clock.Now
-
-	fetch := func() (*PullRequestInfo, error) {
-		return &PullRequestInfo{HeadSHA: "abc"}, nil
-	}
-
-	// Seed five distinct (repo, pr) entries.
-	for i := range 5 {
-		_, err := c.Do(t.Context(), "octo/repo", i+1, fetch)
-		require.NoError(t, err)
-	}
-	require.Equal(t, 5, prInfoCacheLen(c), "all five fresh entries should be cached")
-
-	// Advance past the TTL — all five are now expired but still in the map.
-	clock.Advance(time.Minute + time.Second)
-
-	// A single store should sweep every expired entry before inserting,
-	// keeping the map bounded by the active working set within the TTL.
-	_, err := c.Do(t.Context(), "octo/repo", 99, fetch)
-	require.NoError(t, err)
-	assert.Equal(t, 1, prInfoCacheLen(c), "store should sweep expired entries so the map holds only the live ones")
-}
-
-func TestPRInfoCache_LookupEvictsExpiredEntry(t *testing.T) {
-	clock := newPRInfoFakeClock()
-	c := NewPRInfoCache(time.Minute)
-	c.now = clock.Now
-
-	fetch := func() (*PullRequestInfo, error) {
-		return &PullRequestInfo{HeadSHA: "abc"}, nil
-	}
-
-	// Seed one entry, then expire it without ever writing again.
-	_, err := c.Do(t.Context(), "octo/repo", 42, fetch)
-	require.NoError(t, err)
-	require.Equal(t, 1, prInfoCacheLen(c))
-
-	clock.Advance(time.Minute + time.Second)
-
-	// Lookup it directly (do not go through Do, which would re-fetch and
-	// re-store). The expired entry must be evicted so it does not occupy
-	// memory forever for a key that is never written again.
-	_, ok := c.lookup("octo/repo#42")
-	assert.False(t, ok, "expired entry must be reported as a miss")
-	assert.Equal(t, 0, prInfoCacheLen(c), "lookup must evict the expired entry")
-}
-
-// TestFetchPullRequest_CacheCollapsesDuplicateCalls locks in the
-// integration wiring between InstallationClient.FetchPullRequest and the
-// Client-shared PRInfoCache: repeated calls for the same (repo, pr)
-// within the TTL must hit GitHub exactly once, even when issued through
-// different InstallationClients backed by the same Client.
-func TestFetchPullRequest_CacheCollapsesDuplicateCalls(t *testing.T) {
-	var calls atomic.Int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/octo/repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"head": map[string]string{"ref": "feature", "sha": "abc123"},
-			"base": map[string]string{"ref": "main", "sha": "def456"},
-			"user": map[string]string{"login": "octocat"},
-		})
-	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-
-	cache := NewPRInfoCache(time.Minute)
-	logger := slog.New(slog.NewTextHandler(httptestDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError}))
-
-	newIC := func() *InstallationClient {
-		ghc := gh.NewClient(nil)
-		ghc.BaseURL, _ = url.Parse(server.URL + "/")
-		return &InstallationClient{
-			client:      ghc,
-			logger:      logger,
-			prInfoCache: cache,
-		}
-	}
-
-	ic1 := newIC()
-	ic2 := newIC()
+	ctx := WithPRInfoCache(t.Context())
 
 	want := &PullRequestInfo{HeadRef: "feature", HeadSHA: "abc123", BaseRef: "main", BaseSHA: "def456", User: "octocat"}
 
-	got, err := ic1.FetchPullRequest(t.Context(), "octo/repo", 42)
+	got, err := ic1.FetchPullRequest(ctx, "octo/repo", 42)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 
-	got, err = ic1.FetchPullRequest(t.Context(), "octo/repo", 42)
+	got, err = ic1.FetchPullRequest(ctx, "octo/repo", 42)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 
-	got, err = ic2.FetchPullRequest(t.Context(), "octo/repo", 42)
+	got, err = ic2.FetchPullRequest(ctx, "octo/repo", 42)
 	require.NoError(t, err)
-	assert.Equal(t, want, got, "second InstallationClient sharing the same cache must also see the cached result")
+	assert.Equal(t, want, got, "second InstallationClient sharing the same ctx-scoped cache must also see the cached result")
 
 	assert.Equal(t, int32(1), calls.Load(),
-		"all three FetchPullRequest calls (two on ic1, one on ic2) must collapse to one upstream GitHub call")
+		"three FetchPullRequest calls inside one ctx scope must collapse to one upstream GitHub call")
 }
 
-// TestFetchPullRequest_NoCacheFallsThrough verifies that an InstallationClient
-// with a nil prInfoCache (e.g., constructed via NewInstallationClient in tests)
-// still works correctly, hitting GitHub on every call.
+// TestFetchPullRequest_FreshCachePerScope locks in the structural safety
+// invariant: a new WithPRInfoCache wrap (simulating a new webhook
+// delivery) gets a fresh cache. Even if an earlier scope cached a result
+// for (repo, pr), the next scope must refetch from GitHub. This is the
+// property that prevents stale HeadSHA across deliveries.
+func TestFetchPullRequest_FreshCachePerScope(t *testing.T) {
+	server, calls := newPRFakeGitHubServer(t)
+	defer server.Close()
+
+	ic := newPRTestInstallationClient(t, server)
+
+	// First scope (simulating delivery #1).
+	ctx1 := WithPRInfoCache(t.Context())
+	_, err := ic.FetchPullRequest(ctx1, "octo/repo", 42)
+	require.NoError(t, err)
+	_, err = ic.FetchPullRequest(ctx1, "octo/repo", 42)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), calls.Load(), "two calls in one scope should dedupe to one fetch")
+
+	// Second scope (simulating delivery #2 — e.g., a synchronize event
+	// after a new commit was pushed). Must NOT reuse the first scope's
+	// cache.
+	ctx2 := WithPRInfoCache(t.Context())
+	_, err = ic.FetchPullRequest(ctx2, "octo/repo", 42)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load(), "second scope must refetch — caches are not shared across scopes")
+}
+
+// TestFetchPullRequest_NoCacheFallsThrough verifies that a ctx without a
+// request-scoped cache (tests or ad-hoc callers) falls through to a raw
+// fetch on every call. No memoisation, no panic.
 func TestFetchPullRequest_NoCacheFallsThrough(t *testing.T) {
+	server, calls := newPRFakeGitHubServer(t)
+	defer server.Close()
+
+	ic := newPRTestInstallationClient(t, server)
+
+	for range 3 {
+		_, err := ic.FetchPullRequest(t.Context(), "octo/repo", 42)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, int32(3), calls.Load(), "no cache on ctx → every call must hit GitHub")
+}
+
+// TestFetchPullRequest_ErrorsAreNotCached verifies that a failed fetch
+// does not poison the request-scoped cache: a subsequent call within the
+// same scope must retry rather than return the stale error.
+func TestFetchPullRequest_ErrorsAreNotCached(t *testing.T) {
 	var calls atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/octo/repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
+		n := calls.Add(1)
+		if n < 3 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"head": map[string]string{"sha": "abc123"},
@@ -346,40 +115,53 @@ func TestFetchPullRequest_NoCacheFallsThrough(t *testing.T) {
 		})
 	})
 	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
+	defer server.Close()
 
-	ghc := gh.NewClient(nil)
-	ghc.BaseURL, _ = url.Parse(server.URL + "/")
-	ic := &InstallationClient{
-		client: ghc,
-		logger: slog.New(slog.NewTextHandler(httptestDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
-		// prInfoCache deliberately nil
-	}
+	ic := newPRTestInstallationClient(t, server)
+	ctx := WithPRInfoCache(t.Context())
 
-	for range 3 {
-		_, err := ic.FetchPullRequest(t.Context(), "octo/repo", 42)
-		require.NoError(t, err)
-	}
-	assert.Equal(t, int32(3), calls.Load(), "nil cache should not memoise — every call must hit GitHub")
+	_, err := ic.FetchPullRequest(ctx, "octo/repo", 42)
+	require.Error(t, err)
+	_, err = ic.FetchPullRequest(ctx, "octo/repo", 42)
+	require.Error(t, err, "second call should re-attempt — errors must not be cached")
+
+	got, err := ic.FetchPullRequest(ctx, "octo/repo", 42)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "abc123", got.HeadSHA)
+	assert.Equal(t, int32(3), calls.Load())
 }
 
-// httptestDiscardWriter swallows slog output so test logs stay quiet.
-type httptestDiscardWriter struct{}
+// TestFetchPullRequest_ReturnsIndependentCopies verifies that callers
+// within a single scope receive independent *PullRequestInfo values —
+// mutating one must not affect another caller's view.
+func TestFetchPullRequest_ReturnsIndependentCopies(t *testing.T) {
+	server, _ := newPRFakeGitHubServer(t)
+	defer server.Close()
 
-func (httptestDiscardWriter) Write(p []byte) (int, error) { return len(p), nil }
+	ic := newPRTestInstallationClient(t, server)
+	ctx := WithPRInfoCache(t.Context())
+
+	first, err := ic.FetchPullRequest(ctx, "octo/repo", 42)
+	require.NoError(t, err)
+	second, err := ic.FetchPullRequest(ctx, "octo/repo", 42)
+	require.NoError(t, err)
+
+	first.HeadSHA = "mutated"
+	assert.Equal(t, "abc123", second.HeadSHA, "second caller must not observe the first caller's mutation")
+}
 
 // TestForInstallation_CachesByInstallationID locks in the invariant that
 // repeat ForInstallation calls for the same installationID return the
 // same InstallationClient instance, so the underlying http.Client,
 // ghinstallation transport (and its installation-token cache), and any
-// per-InstallationClient state survive across webhook deliveries.
+// shared per-installation state survive across webhook deliveries.
 // Different installationIDs must still receive distinct clients.
 func TestForInstallation_CachesByInstallationID(t *testing.T) {
 	c := &Client{
 		appID:         12345,
-		logger:        slog.New(slog.NewTextHandler(httptestDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+		logger:        slog.New(slog.NewTextHandler(prDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
 		appSlug:       "schemabot", // bypass the slug-fetch retry path
-		prInfoCache:   NewPRInfoCache(time.Minute),
 		installations: make(map[int64]*InstallationClient),
 		privateKey:    testRSAKeyPEM(t),
 	}
@@ -393,8 +175,6 @@ func TestForInstallation_CachesByInstallationID(t *testing.T) {
 
 	assert.Same(t, a1, a2, "same installationID must return the cached InstallationClient")
 	assert.NotSame(t, a1, b, "distinct installationIDs must return distinct InstallationClients")
-	assert.Same(t, c.prInfoCache, a1.prInfoCache, "cached InstallationClient must carry the Client-shared PRInfoCache")
-	assert.Same(t, c.prInfoCache, b.prInfoCache, "every InstallationClient must share the same PRInfoCache instance")
 }
 
 // TestForInstallation_RefreshesSlugOnCachedClient covers the slug recovery
@@ -405,9 +185,8 @@ func TestForInstallation_CachesByInstallationID(t *testing.T) {
 func TestForInstallation_RefreshesSlugOnCachedClient(t *testing.T) {
 	c := &Client{
 		appID:         12345,
-		logger:        slog.New(slog.NewTextHandler(httptestDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+		logger:        slog.New(slog.NewTextHandler(prDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
 		appSlug:       "", // slug was unavailable at construction time
-		prInfoCache:   NewPRInfoCache(time.Minute),
 		installations: make(map[int64]*InstallationClient),
 		privateKey:    testRSAKeyPEM(t),
 	}
@@ -427,6 +206,43 @@ func TestForInstallation_RefreshesSlugOnCachedClient(t *testing.T) {
 	assert.Equal(t, "schemabot", ic2.appSlug, "cached InstallationClient must adopt the recovered slug")
 }
 
+// newPRFakeGitHubServer returns an httptest server that responds to
+// GET /repos/octo/repo/pulls/42 with a canonical PR payload, and the
+// counter of how many times the endpoint has been hit.
+func newPRFakeGitHubServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/octo/repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"head": map[string]string{"ref": "feature", "sha": "abc123"},
+			"base": map[string]string{"ref": "main", "sha": "def456"},
+			"user": map[string]string{"login": "octocat"},
+		})
+	})
+	return httptest.NewServer(mux), &calls
+}
+
+// newPRTestInstallationClient constructs an InstallationClient pointed at
+// the given httptest server. No cache is attached at the client level —
+// the request-scoped cache (if any) lives on ctx.
+func newPRTestInstallationClient(t *testing.T, server *httptest.Server) *InstallationClient {
+	t.Helper()
+	ghc := gh.NewClient(nil)
+	ghc.BaseURL, _ = url.Parse(server.URL + "/")
+	return &InstallationClient{
+		client: ghc,
+		logger: slog.New(slog.NewTextHandler(prDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+	}
+}
+
+// prDiscardWriter swallows slog output so test logs stay quiet.
+type prDiscardWriter struct{}
+
+func (prDiscardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
 // testRSAKeyPEM generates a fresh 2048-bit RSA private key and returns it
 // PEM-encoded. ghinstallation.New requires a parseable RSA private key
 // even though no JWT is actually exercised here.
@@ -438,44 +254,4 @@ func testRSAKeyPEM(t *testing.T) []byte {
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	})
-}
-
-func TestPRInfoCache_NonPositiveTTLDisablesCaching(t *testing.T) {
-	c := NewPRInfoCache(0)
-
-	var calls atomic.Int32
-	fetch := func() (*PullRequestInfo, error) {
-		calls.Add(1)
-		return &PullRequestInfo{}, nil
-	}
-
-	for range 5 {
-		_, err := c.Do(t.Context(), "octo/repo", 42, fetch)
-		require.NoError(t, err)
-	}
-	assert.Equal(t, int32(5), calls.Load(), "TTL<=0 should bypass the cache entirely")
-}
-
-// prInfoFakeClock returns a controllable time source for cache TTL tests.
-// Named distinctly so it does not collide with other in-package cache
-// test files that may carry their own fake clock.
-type prInfoFakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func newPRInfoFakeClock() *prInfoFakeClock {
-	return &prInfoFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-}
-
-func (f *prInfoFakeClock) Now() time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.now
-}
-
-func (f *prInfoFakeClock) Advance(d time.Duration) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.now = f.now.Add(d)
 }

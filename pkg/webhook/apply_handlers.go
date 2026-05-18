@@ -19,6 +19,8 @@ import (
 func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseName string, installationID int64, requestedBy string, result CommandResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	// Dedupe FetchPullRequest calls within this command invocation.
+	ctx = ghclient.WithPRInfoCache(ctx)
 
 	client, err := h.ghClient.ForInstallation(installationID)
 	if err != nil {
@@ -282,6 +284,8 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, databaseName string, installationID int64, requestedBy string, result CommandResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	// Dedupe FetchPullRequest calls within this command invocation.
+	ctx = ghclient.WithPRInfoCache(ctx)
 
 	client, err := h.ghClient.ForInstallation(installationID)
 	if err != nil {

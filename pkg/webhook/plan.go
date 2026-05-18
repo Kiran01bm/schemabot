@@ -17,6 +17,8 @@ import (
 func (h *Handler) handlePlanCommand(w http.ResponseWriter, repo string, pr int, environment, databaseName string, installationID int64, requestedBy string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	// Dedupe FetchPullRequest calls within this command invocation.
+	ctx = ghclient.WithPRInfoCache(ctx)
 
 	client, err := h.ghClient.ForInstallation(installationID)
 	if err != nil {
@@ -102,6 +104,8 @@ func (h *Handler) handlePlanCommand(w http.ResponseWriter, repo string, pr int, 
 func (h *Handler) handleMultiEnvPlan(repo string, pr int, databaseName string, installationID int64, requestedBy string, isAutoPlan bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	// Dedupe FetchPullRequest calls within this plan invocation.
+	ctx = ghclient.WithPRInfoCache(ctx)
 
 	client, err := h.ghClient.ForInstallation(installationID)
 	if err != nil {

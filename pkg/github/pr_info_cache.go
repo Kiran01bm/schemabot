@@ -4,156 +4,68 @@ import (
 	"context"
 	"strconv"
 	"sync"
-	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
-// DefaultPRInfoCacheTTL is the default TTL used when NewClient constructs
-// the shared PRInfoCache. 30s is long enough to absorb webhook retries
-// and tight back-to-back command bursts targeting the same (repo, pr),
-// but short enough that staleness is irrelevant for human-paced PR
-// comment flows.
-const DefaultPRInfoCacheTTL = 30 * time.Second
-
-// PRInfoCache memoises FetchPullRequest results keyed by (repo, pr) with
-// a fixed TTL. Concurrent fetches for the same key collapse into a single
-// upstream request via singleflight. Errors are not cached — each failure
-// re-attempts fresh so transient GitHub outages do not pin a bad state
-// for the TTL window.
+// requestPRInfoCache memoises FetchPullRequest results for the lifetime
+// of a single webhook delivery (or any other ctx-bounded operation it is
+// attached to). A fresh cache is constructed at every entry point via
+// WithPRInfoCache, so the cached value cannot outlive the scope it was
+// created for — eliminating the staleness risk that a TTL'd cross-delivery
+// cache would have for mutable PR head data (HeadSHA can change between
+// deliveries when a new commit is pushed).
 //
-// One cache is owned by the Client factory and shared across every
-// InstallationClient it produces, so cache hits actually accrue across
-// the short-lived InstallationClients spawned per webhook delivery —
-// which is the dedup pattern that justifies the cache.
-//
-// Unlike CheckStatusCache, the cached value is stored directly as
-// PullRequestInfo: it has no identity-dependent fields (HeadRef, HeadSHA,
-// BaseRef, BaseSHA, User), so cross-instance reuse is structurally safe
-// without any per-call re-derivation.
-type PRInfoCache struct {
-	ttl   time.Duration
-	mu    sync.RWMutex
-	m     map[string]prInfoCacheEntry
-	group singleflight.Group
-	now   func() time.Time // overridable for tests
+// Within one scope, multiple handlers calling FetchPullRequest for the
+// same (repo, pr) collapse to a single upstream GitHub call. Concurrent
+// callers from spawned goroutines that share the ctx see the populated
+// entry once the first fetch completes.
+type requestPRInfoCache struct {
+	mu sync.Mutex
+	m  map[string]*PullRequestInfo
 }
 
-type prInfoCacheEntry struct {
-	info    PullRequestInfo
-	fetched time.Time
-}
+type prInfoCacheCtxKey struct{}
 
-// NewPRInfoCache constructs a cache with the given TTL. A non-positive
-// TTL disables caching: Do always invokes fetch.
-func NewPRInfoCache(ttl time.Duration) *PRInfoCache {
-	return &PRInfoCache{
-		ttl: ttl,
-		m:   make(map[string]prInfoCacheEntry),
-		now: time.Now,
-	}
-}
-
-// Do returns the cached PR info for (repo, pr) if a fresh entry exists,
-// otherwise invokes fetch and stores its result. Concurrent callers for
-// the same (repo, pr) collapse into a single fetch invocation.
+// WithPRInfoCache returns a new context carrying a fresh request-scoped
+// PR-info cache. Webhook entry points should wrap their per-operation
+// ctx with this so FetchPullRequest calls within that scope dedupe.
 //
-// Each caller observes its own ctx for cancellation/deadline: a caller
-// whose ctx fires while waiting on another caller's in-flight fetch
-// returns promptly with ctx.Err(), without aborting the shared fetch
-// (other waiters and future callers can still receive its result).
-//
-// When the cache's TTL is non-positive, fetch is invoked on every call
-// and no result is stored.
-//
-// The returned *PullRequestInfo points to a fresh copy of the cached
-// value, so callers can read or mutate it freely without affecting
-// other readers.
-func (c *PRInfoCache) Do(ctx context.Context, repo string, pr int, fetch func() (*PullRequestInfo, error)) (*PullRequestInfo, error) {
-	if c.ttl <= 0 {
-		return fetch()
-	}
-
-	key := repo + "#" + strconv.Itoa(pr)
-
-	if info, ok := c.lookup(key); ok {
-		return info, nil
-	}
-
-	ch := c.group.DoChan(key, func() (any, error) {
-		// Re-check inside the single-flight critical section: a concurrent
-		// caller may have populated the entry between our miss and here.
-		if info, ok := c.lookup(key); ok {
-			return info, nil
-		}
-		info, err := fetch()
-		if err != nil {
-			return nil, err
-		}
-		if info == nil {
-			return nil, nil
-		}
-		c.store(key, *info)
-		// Return a fresh copy so subsequent waiters/callers each get their
-		// own pointer.
-		stored := *info
-		return &stored, nil
+// Calling WithPRInfoCache twice on the same ctx replaces the previous
+// cache with a fresh one; nested scopes thus get their own clean cache.
+func WithPRInfoCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, prInfoCacheCtxKey{}, &requestPRInfoCache{
+		m: make(map[string]*PullRequestInfo),
 	})
-
-	select {
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, res.Err
-		}
-		if res.Val == nil {
-			return nil, nil
-		}
-		// Single-flight broadcasts the same value to every waiter. Hand
-		// each one its own copy so a caller mutating the returned struct
-		// cannot affect another caller's view.
-		shared := res.Val.(*PullRequestInfo)
-		copyOf := *shared
-		return &copyOf, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }
 
-func (c *PRInfoCache) lookup(key string) (*PullRequestInfo, bool) {
-	c.mu.RLock()
-	entry, ok := c.m[key]
-	c.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if c.now().Sub(entry.fetched) >= c.ttl {
-		// Opportunistically evict on read so a key that is repeatedly
-		// looked up after expiry does not occupy memory until something
-		// happens to write to it.
-		c.mu.Lock()
-		if cur, stillThere := c.m[key]; stillThere && c.now().Sub(cur.fetched) >= c.ttl {
-			delete(c.m, key)
-		}
-		c.mu.Unlock()
-		return nil, false
-	}
-	info := entry.info
-	return &info, true
+// prInfoCacheFromContext returns the request-scoped cache attached to ctx,
+// or nil if none has been attached. Returning nil lets FetchPullRequest
+// fall through to a raw fetch for callers (tests, ad-hoc usage) that did
+// not set up a cache scope.
+func prInfoCacheFromContext(ctx context.Context) *requestPRInfoCache {
+	c, _ := ctx.Value(prInfoCacheCtxKey{}).(*requestPRInfoCache)
+	return c
 }
 
-func (c *PRInfoCache) store(key string, info PullRequestInfo) {
+// get returns the cached PR info for (repo, pr) if present.
+func (c *requestPRInfoCache) get(repo string, pr int) (*PullRequestInfo, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Sweep expired entries so the map stays bounded by the active
-	// working set within the TTL window, not the total distinct keys
-	// ever seen. Keys that are written once and never looked up again
-	// (e.g. an inactive PR) would otherwise occupy memory for the
-	// lifetime of the process.
-	now := c.now()
-	for k, entry := range c.m {
-		if now.Sub(entry.fetched) >= c.ttl {
-			delete(c.m, k)
-		}
+	info, ok := c.m[cacheKey(repo, pr)]
+	return info, ok
+}
+
+// set stores PR info for (repo, pr). A copy is stored so callers
+// mutating the returned struct cannot affect the cached value.
+func (c *requestPRInfoCache) set(repo string, pr int, info *PullRequestInfo) {
+	if info == nil {
+		return
 	}
-	c.m[key] = prInfoCacheEntry{info: info, fetched: now}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	stored := *info
+	c.m[cacheKey(repo, pr)] = &stored
+}
+
+func cacheKey(repo string, pr int) string {
+	return repo + "#" + strconv.Itoa(pr)
 }
