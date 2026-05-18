@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -161,10 +162,10 @@ func TestForInstallation_CachesByInstallationID(t *testing.T) {
 	c := &Client{
 		appID:         12345,
 		logger:        slog.New(slog.NewTextHandler(prDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
-		appSlug:       "schemabot", // bypass the slug-fetch retry path
 		installations: make(map[int64]*InstallationClient),
 		privateKey:    testRSAKeyPEM(t),
 	}
+	c.storeAppSlug("schemabot") // bypass the slug-fetch retry path
 
 	a1, err := c.ForInstallation(100)
 	require.NoError(t, err)
@@ -186,24 +187,85 @@ func TestForInstallation_RefreshesSlugOnCachedClient(t *testing.T) {
 	c := &Client{
 		appID:         12345,
 		logger:        slog.New(slog.NewTextHandler(prDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
-		appSlug:       "", // slug was unavailable at construction time
 		installations: make(map[int64]*InstallationClient),
 		privateKey:    testRSAKeyPEM(t),
 	}
+	c.storeAppSlug("") // slug was unavailable at construction time
 	// Bypass the slug-fetch retry by claiming we just tried.
 	c.lastSlugAttempt = time.Now()
 
 	ic1, err := c.ForInstallation(100)
 	require.NoError(t, err)
-	assert.Equal(t, "", ic1.appSlug, "client constructed before recovery must start with empty slug")
+	assert.Equal(t, "", ic1.loadAppSlug(), "client constructed before recovery must start with empty slug")
 
 	// Simulate the slug becoming available later.
-	c.appSlug = "schemabot"
+	c.storeAppSlug("schemabot")
 
 	ic2, err := c.ForInstallation(100)
 	require.NoError(t, err)
 	assert.Same(t, ic1, ic2, "same InstallationClient should be returned (no rebuild)")
-	assert.Equal(t, "schemabot", ic2.appSlug, "cached InstallationClient must adopt the recovered slug")
+	assert.Equal(t, "schemabot", ic2.loadAppSlug(), "cached InstallationClient must adopt the recovered slug")
+}
+
+// TestForInstallation_AppSlugIsRaceFreeUnderConcurrency locks in the
+// invariant that concurrent ForInstallation calls refreshing the cached
+// InstallationClient's appSlug do not race with concurrent isOwnAppSlug
+// reads on that same client. Without atomic.Pointer access, the race
+// detector would flag the unsynchronised string mutation here.
+func TestForInstallation_AppSlugIsRaceFreeUnderConcurrency(t *testing.T) {
+	c := &Client{
+		appID:         12345,
+		logger:        slog.New(slog.NewTextHandler(prDiscardWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+		installations: make(map[int64]*InstallationClient),
+		privateKey:    testRSAKeyPEM(t),
+	}
+	c.storeAppSlug("schemabot")
+
+	// Prime the cache so subsequent ForInstallation calls hit the
+	// refresh path that writes existing.appSlug.
+	ic, err := c.ForInstallation(100)
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Writers: drive ForInstallation, which refreshes existing.appSlug.
+	for range 4 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					// Alternate slug values to maximise the chance of a
+					// torn read if access were unsynchronised.
+					c.storeAppSlug("schemabot")
+					_, _ = c.ForInstallation(100)
+					c.storeAppSlug("schemabot-alt")
+					_, _ = c.ForInstallation(100)
+				}
+			}
+		})
+	}
+
+	// Readers: pound isOwnAppSlug on the cached client.
+	for range 4 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					ic.isOwnAppSlug("schemabot")
+					ic.isOwnAppSlug("other")
+				}
+			}
+		})
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }
 
 // newPRFakeGitHubServer returns an httptest server that responds to

@@ -13,6 +13,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -28,11 +29,23 @@ type GitHubClientFactory interface {
 
 // Client handles GitHub App-level operations and creates per-installation clients.
 type Client struct {
-	appID           int64
-	privateKey      []byte
-	logger          *slog.Logger
-	appSlug         string    // fetched from GitHub API at startup, used to identify own check runs
-	lastSlugAttempt time.Time // rate-limits slug fetch retries
+	appID      int64
+	privateKey []byte
+	logger     *slog.Logger
+
+	// appSlug is the GitHub App's slug, fetched from GitHub at startup
+	// (best-effort — may be empty if the initial fetch failed). It is
+	// stored as atomic.Pointer[string] so concurrent ForInstallation and
+	// InstallationClient.isOwnAppSlug calls observe consistent values
+	// without holding a lock on the hot read path. The pointer is non-nil
+	// after NewClient returns (holds the empty string if the fetch failed).
+	appSlug atomic.Pointer[string]
+
+	// slugFetchMu serialises slug-fetch attempts so concurrent
+	// ForInstallation callers do not thundering-herd retry on startup
+	// failure. lastSlugAttempt is read+written only under this mutex.
+	slugFetchMu     sync.Mutex
+	lastSlugAttempt time.Time
 
 	// installations caches per-installation clients keyed by installationID
 	// so the underlying http.Client, gh.Client, githubv4.Client, and
@@ -41,6 +54,19 @@ type Client struct {
 	// every call.
 	installationsMu sync.Mutex
 	installations   map[int64]*InstallationClient
+}
+
+// loadAppSlug returns the current app slug, or empty if not yet fetched.
+func (c *Client) loadAppSlug() string {
+	if p := c.appSlug.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// storeAppSlug atomically updates the app slug.
+func (c *Client) storeAppSlug(slug string) {
+	c.appSlug.Store(&slug)
 }
 
 // slugFetchRetryCooldown is how long to wait between retry attempts when the
@@ -62,6 +88,9 @@ func NewClient(appID int64, privateKey []byte, logger *slog.Logger) *Client {
 		logger:        logger,
 		installations: make(map[int64]*InstallationClient),
 	}
+	// Seed the atomic with the empty string so loadAppSlug never returns
+	// from a nil pointer.
+	c.storeAppSlug("")
 
 	// Fetch the app slug so we can identify our own check runs in statusCheckRollup.
 	// Non-fatal: if GitHub is down, the server still starts but the check gate won't
@@ -74,7 +103,10 @@ func NewClient(appID int64, privateKey []byte, logger *slog.Logger) *Client {
 // fetchAppSlug fetches the app slug from GitHub via GET /app.
 // On failure, logs an error and leaves appSlug empty.
 func (c *Client) fetchAppSlug() {
+	c.slugFetchMu.Lock()
 	c.lastSlugAttempt = time.Now()
+	c.slugFetchMu.Unlock()
+
 	transport, err := ghinstallation.NewAppsTransport(http.DefaultTransport, c.appID, c.privateKey)
 	if err != nil {
 		c.logger.Error("failed to create app transport for slug fetch", "error", err)
@@ -87,8 +119,9 @@ func (c *Client) fetchAppSlug() {
 			"app_id", c.appID, "error", err)
 		return
 	}
-	c.appSlug = app.GetSlug()
-	c.logger.Info("fetched GitHub App slug", "slug", c.appSlug)
+	slug := app.GetSlug()
+	c.storeAppSlug(slug)
+	c.logger.Info("fetched GitHub App slug", "slug", slug)
 }
 
 // ForInstallation returns a GitHub client scoped to a specific installation,
@@ -105,24 +138,30 @@ func (c *Client) ForInstallation(installationID int64) (*InstallationClient, err
 	// Retry slug fetch if it failed at startup (e.g., GitHub was down).
 	// Rate-limited to once per 5 seconds to avoid hammering GitHub during
 	// an outage while still recovering quickly once it's back.
-	if c.appSlug == "" {
-		if time.Since(c.lastSlugAttempt) > slugFetchRetryCooldown {
+	if c.loadAppSlug() == "" {
+		c.slugFetchMu.Lock()
+		shouldRetry := time.Since(c.lastSlugAttempt) > slugFetchRetryCooldown
+		c.slugFetchMu.Unlock()
+		if shouldRetry {
 			c.logger.Info("app slug not yet fetched, retrying")
 			c.fetchAppSlug()
 		}
-		if c.appSlug == "" {
+		if c.loadAppSlug() == "" {
 			c.logger.Error("app slug unavailable — check gate will block PR applies if own checks are failing")
 		}
 	}
+
+	slug := c.loadAppSlug()
 
 	c.installationsMu.Lock()
 	defer c.installationsMu.Unlock()
 
 	if existing, ok := c.installations[installationID]; ok {
-		// Refresh the cached client's slug snapshot so a slug recovery
-		// during the lifetime of this process propagates to clients
-		// constructed before recovery.
-		existing.appSlug = c.appSlug
+		// Refresh the cached client's slug snapshot atomically so a slug
+		// recovery during the lifetime of this process propagates to
+		// clients constructed before recovery — without racing concurrent
+		// isOwnAppSlug reads on the same InstallationClient.
+		existing.storeAppSlug(slug)
 		return existing, nil
 	}
 
@@ -133,14 +172,14 @@ func (c *Client) ForInstallation(installationID int64) (*InstallationClient, err
 	httpc := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	ghClient := gh.NewClient(httpc)
 	ic := &InstallationClient{
-		client:  ghClient,
-		gql:     githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
-		logger:  c.logger,
-		appSlug: c.appSlug,
+		client: ghClient,
+		gql:    githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
+		logger: c.logger,
 	}
+	ic.storeAppSlug(slug)
 	c.installations[installationID] = ic
 	c.logger.Info("constructed installation client",
-		"installation_id", installationID, "app_slug", c.appSlug)
+		"installation_id", installationID, "app_slug", slug)
 	return ic, nil
 }
 
@@ -154,12 +193,13 @@ func NewInstallationClient(client *gh.Client, logger *slog.Logger) *Installation
 
 // NewInstallationClientWithSlug creates an InstallationClient with an explicit app slug.
 func NewInstallationClientWithSlug(client *gh.Client, logger *slog.Logger, appSlug string) *InstallationClient {
-	return &InstallationClient{
-		client:  client,
-		gql:     githubv4.NewEnterpriseClient(graphQLURLFor(client), client.Client()),
-		logger:  logger,
-		appSlug: appSlug,
+	ic := &InstallationClient{
+		client: client,
+		gql:    githubv4.NewEnterpriseClient(graphQLURLFor(client), client.Client()),
+		logger: logger,
 	}
+	ic.storeAppSlug(appSlug)
+	return ic
 }
 
 // graphQLURLFor returns the GraphQL endpoint for a given go-github client by
@@ -171,10 +211,29 @@ func graphQLURLFor(client *gh.Client) string {
 
 // InstallationClient wraps a go-github client scoped to a specific GitHub App installation.
 type InstallationClient struct {
-	client  *gh.Client
-	gql     *githubv4.Client
-	logger  *slog.Logger
-	appSlug string // the app's slug, used to identify own check runs
+	client *gh.Client
+	gql    *githubv4.Client
+	logger *slog.Logger
+
+	// appSlug is the GitHub App's slug used to identify own check runs.
+	// Stored as atomic.Pointer[string] because cached InstallationClients
+	// are reused across webhook deliveries and ForInstallation may refresh
+	// this field after a slug recovery while concurrent isOwnAppSlug reads
+	// run on other goroutines.
+	appSlug atomic.Pointer[string]
+}
+
+// loadAppSlug returns the current app slug, or empty if not yet set.
+func (ic *InstallationClient) loadAppSlug() string {
+	if p := ic.appSlug.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// storeAppSlug atomically updates the app slug.
+func (ic *InstallationClient) storeAppSlug(slug string) {
+	ic.appSlug.Store(&slug)
 }
 
 // IsNotFoundError checks if an error is a GitHub API 404 Not Found error.
@@ -503,8 +562,17 @@ type statusCheckRollupQuery struct {
 }
 
 // isOwnAppSlug returns true if the given slug belongs to this SchemaBot instance.
+// Returns false on empty slug (defends against StatusContext rows and clients
+// whose appSlug has not yet been fetched).
 func (ic *InstallationClient) isOwnAppSlug(slug string) bool {
-	return strings.EqualFold(slug, ic.appSlug)
+	if slug == "" {
+		return false
+	}
+	own := ic.loadAppSlug()
+	if own == "" {
+		return false
+	}
+	return strings.EqualFold(slug, own)
 }
 
 // GetPRCheckStatuses fetches all check runs and commit statuses for a ref via
