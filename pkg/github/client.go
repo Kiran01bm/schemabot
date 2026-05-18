@@ -33,6 +33,20 @@ type Client struct {
 	logger          *slog.Logger
 	appSlug         string    // fetched from GitHub API at startup, used to identify own check runs
 	lastSlugAttempt time.Time // rate-limits slug fetch retries
+
+	// prInfoCache memoises FetchPullRequest results across every
+	// InstallationClient produced by ForInstallation, so back-to-back
+	// webhook deliveries and command bursts targeting the same (repo, pr)
+	// collapse to a single upstream GitHub call.
+	prInfoCache *PRInfoCache
+
+	// installations caches per-installation clients keyed by installationID
+	// so the underlying http.Client, gh.Client, githubv4.Client, and
+	// ghinstallation transport (and its installation-token cache) are
+	// reused across webhook deliveries instead of being reconstructed on
+	// every call. This also keeps any per-InstallationClient state warm.
+	installationsMu sync.Mutex
+	installations   map[int64]*InstallationClient
 }
 
 // slugFetchRetryCooldown is how long to wait between retry attempts when the
@@ -42,11 +56,23 @@ const slugFetchRetryCooldown = 5 * time.Second
 // NewClient creates a new GitHub App client and fetches the app's slug from GitHub.
 // If the slug can't be fetched (e.g., GitHub is down), the server still starts but
 // PR applies are blocked by the check gate since we can't identify our own checks.
+//
+// The returned Client owns a shared PRInfoCache with DefaultPRInfoCacheTTL that
+// is handed to every InstallationClient produced by ForInstallation. Use
+// NewClientWithCacheTTL to override the TTL (e.g., to 0 to disable caching).
 func NewClient(appID int64, privateKey []byte, logger *slog.Logger) *Client {
+	return NewClientWithCacheTTL(appID, privateKey, logger, DefaultPRInfoCacheTTL)
+}
+
+// NewClientWithCacheTTL constructs a Client with an explicit PRInfoCache TTL.
+// A non-positive TTL disables the cache: FetchPullRequest hits GitHub on every call.
+func NewClientWithCacheTTL(appID int64, privateKey []byte, logger *slog.Logger, prInfoCacheTTL time.Duration) *Client {
 	c := &Client{
-		appID:      appID,
-		privateKey: privateKey,
-		logger:     logger,
+		appID:         appID,
+		privateKey:    privateKey,
+		logger:        logger,
+		prInfoCache:   NewPRInfoCache(prInfoCacheTTL),
+		installations: make(map[int64]*InstallationClient),
 	}
 
 	// Fetch the app slug so we can identify our own check runs in statusCheckRollup.
@@ -77,9 +103,16 @@ func (c *Client) fetchAppSlug() {
 	c.logger.Info("fetched GitHub App slug", "slug", c.appSlug)
 }
 
-// ForInstallation creates a GitHub client scoped to a specific installation.
+// ForInstallation returns a GitHub client scoped to a specific installation,
+// reusing the cached client for that installationID when one already exists.
 // The ghinstallation library handles JWT generation, token exchange, caching,
-// and refresh automatically.
+// and refresh automatically; reusing the InstallationClient additionally
+// preserves HTTP keep-alive, the ghinstallation token cache, and any shared
+// per-installation state (such as PR-info cache hits) across webhook deliveries.
+//
+// The cached client's appSlug is refreshed on every call so a Client that
+// recovers its slug after a startup failure does not strand existing
+// InstallationClients with an empty slug.
 func (c *Client) ForInstallation(installationID int64) (*InstallationClient, error) {
 	// Retry slug fetch if it failed at startup (e.g., GitHub was down).
 	// Rate-limited to once per 5 seconds to avoid hammering GitHub during
@@ -93,18 +126,35 @@ func (c *Client) ForInstallation(installationID int64) (*InstallationClient, err
 			c.logger.Error("app slug unavailable — check gate will block PR applies if own checks are failing")
 		}
 	}
+
+	c.installationsMu.Lock()
+	defer c.installationsMu.Unlock()
+
+	if existing, ok := c.installations[installationID]; ok {
+		// Refresh the cached client's slug snapshot so a slug recovery
+		// during the lifetime of this process propagates to clients
+		// constructed before recovery.
+		existing.appSlug = c.appSlug
+		return existing, nil
+	}
+
 	transport, err := ghinstallation.New(http.DefaultTransport, c.appID, installationID, c.privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("create installation transport: %w", err)
+		return nil, fmt.Errorf("create installation transport for installation %d: %w", installationID, err)
 	}
 	httpc := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	ghClient := gh.NewClient(httpc)
-	return &InstallationClient{
-		client:  ghClient,
-		gql:     githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
-		logger:  c.logger,
-		appSlug: c.appSlug,
-	}, nil
+	ic := &InstallationClient{
+		client:      ghClient,
+		gql:         githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
+		logger:      c.logger,
+		appSlug:     c.appSlug,
+		prInfoCache: c.prInfoCache,
+	}
+	c.installations[installationID] = ic
+	c.logger.Info("constructed installation client",
+		"installation_id", installationID, "app_slug", c.appSlug)
+	return ic, nil
 }
 
 // NewInstallationClient creates an InstallationClient from a pre-configured go-github client.
@@ -134,10 +184,11 @@ func graphQLURLFor(client *gh.Client) string {
 
 // InstallationClient wraps a go-github client scoped to a specific GitHub App installation.
 type InstallationClient struct {
-	client  *gh.Client
-	gql     *githubv4.Client
-	logger  *slog.Logger
-	appSlug string // the app's slug, used to identify own check runs
+	client      *gh.Client
+	gql         *githubv4.Client
+	logger      *slog.Logger
+	appSlug     string // the app's slug, used to identify own check runs
+	prInfoCache *PRInfoCache
 }
 
 // IsNotFoundError checks if an error is a GitHub API 404 Not Found error.
@@ -202,11 +253,27 @@ type PullRequestInfo struct {
 }
 
 // FetchPullRequest gets PR information.
+//
+// Results are served from the Client-shared per-(repo, pr) cache when one
+// is configured, so back-to-back webhook deliveries and command bursts
+// targeting the same PR collapse to a single upstream GitHub call across
+// every InstallationClient spawned in that window. PullRequestInfo has no
+// identity-dependent fields, so cross-instance cache reuse is structurally
+// safe without any per-call re-derivation.
 func (ic *InstallationClient) FetchPullRequest(ctx context.Context, repo string, pr int) (*PullRequestInfo, error) {
+	if ic.prInfoCache == nil {
+		return ic.fetchPullRequest(ctx, repo, pr)
+	}
+	return ic.prInfoCache.Do(ctx, repo, pr, func() (*PullRequestInfo, error) {
+		return ic.fetchPullRequest(ctx, repo, pr)
+	})
+}
+
+func (ic *InstallationClient) fetchPullRequest(ctx context.Context, repo string, pr int) (*PullRequestInfo, error) {
 	owner, repoName := splitRepo(repo)
 	ghPR, _, err := ic.client.PullRequests.Get(ctx, owner, repoName, pr)
 	if err != nil {
-		return nil, fmt.Errorf("fetch pull request: %w", err)
+		return nil, fmt.Errorf("fetch pull request %s#%d: %w", repo, pr, err)
 	}
 	return &PullRequestInfo{
 		HeadRef: ghPR.GetHead().GetRef(),
