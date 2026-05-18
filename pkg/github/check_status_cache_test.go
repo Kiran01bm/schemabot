@@ -38,9 +38,9 @@ func TestCheckStatusCache_HitsCacheWithinTTL(t *testing.T) {
 	c := NewCheckStatusCache(time.Minute)
 	c.now = clock.Now
 
-	var calls int32
+	var calls atomic.Int32
 	fetch := func() ([]PRCheckStatus, error) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		return []PRCheckStatus{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, nil
 	}
 
@@ -53,7 +53,7 @@ func TestCheckStatusCache_HitsCacheWithinTTL(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, first, second, "second call should return the cached slice")
-	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "fetch should be invoked only once within the TTL")
+	assert.Equal(t, int32(1), calls.Load(), "fetch should be invoked only once within the TTL")
 }
 
 func TestCheckStatusCache_RefetchesAfterTTL(t *testing.T) {
@@ -61,9 +61,9 @@ func TestCheckStatusCache_RefetchesAfterTTL(t *testing.T) {
 	c := NewCheckStatusCache(time.Minute)
 	c.now = clock.Now
 
-	var calls int32
+	var calls atomic.Int32
 	fetch := func() ([]PRCheckStatus, error) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		return []PRCheckStatus{{Name: "ci/lint"}}, nil
 	}
 
@@ -75,16 +75,16 @@ func TestCheckStatusCache_RefetchesAfterTTL(t *testing.T) {
 	_, err = c.Do("octo/repo", "abc123", fetch)
 	require.NoError(t, err)
 
-	assert.Equal(t, int32(2), atomic.LoadInt32(&calls), "expired entry should trigger a fresh fetch")
+	assert.Equal(t, int32(2), calls.Load(), "expired entry should trigger a fresh fetch")
 }
 
 func TestCheckStatusCache_KeysAreIndependent(t *testing.T) {
 	c := NewCheckStatusCache(time.Minute)
 	c.now = newFakeClock().Now
 
-	var calls int32
+	var calls atomic.Int32
 	fetch := func() ([]PRCheckStatus, error) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		return nil, nil
 	}
 
@@ -95,17 +95,17 @@ func TestCheckStatusCache_KeysAreIndependent(t *testing.T) {
 	_, err = c.Do("octo/other", "sha-one", fetch)
 	require.NoError(t, err)
 
-	assert.Equal(t, int32(3), atomic.LoadInt32(&calls), "each unique (repo, sha) should miss the cache")
+	assert.Equal(t, int32(3), calls.Load(), "each unique (repo, sha) should miss the cache")
 }
 
 func TestCheckStatusCache_ErrorsAreNotCached(t *testing.T) {
 	c := NewCheckStatusCache(time.Minute)
 	c.now = newFakeClock().Now
 
-	var calls int32
+	var calls atomic.Int32
 	wantErr := errors.New("boom")
 	fetch := func() ([]PRCheckStatus, error) {
-		n := atomic.AddInt32(&calls, 1)
+		n := calls.Add(1)
 		if n < 3 {
 			return nil, wantErr
 		}
@@ -120,7 +120,7 @@ func TestCheckStatusCache_ErrorsAreNotCached(t *testing.T) {
 	got, err := c.Do("octo/repo", "abc", fetch)
 	require.NoError(t, err)
 	assert.Equal(t, []PRCheckStatus{{Name: "ci/lint"}}, got)
-	assert.Equal(t, int32(3), atomic.LoadInt32(&calls))
+	assert.Equal(t, int32(3), calls.Load())
 }
 
 func TestCheckStatusCache_SingleFlightCollapsesConcurrentFetches(t *testing.T) {
@@ -128,10 +128,10 @@ func TestCheckStatusCache_SingleFlightCollapsesConcurrentFetches(t *testing.T) {
 	c.now = newFakeClock().Now
 
 	const concurrency = 25
-	var calls int32
+	var calls atomic.Int32
 	release := make(chan struct{})
 	fetch := func() ([]PRCheckStatus, error) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		<-release // hold open until all goroutines have joined the flight
 		return []PRCheckStatus{{Name: "ci/lint"}}, nil
 	}
@@ -139,7 +139,7 @@ func TestCheckStatusCache_SingleFlightCollapsesConcurrentFetches(t *testing.T) {
 	var wg sync.WaitGroup
 	results := make([][]PRCheckStatus, concurrency)
 	errs := make([]error, concurrency)
-	for i := 0; i < concurrency; i++ {
+	for i := range concurrency {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -155,8 +155,8 @@ func TestCheckStatusCache_SingleFlightCollapsesConcurrentFetches(t *testing.T) {
 	close(release)
 	wg.Wait()
 
-	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "all concurrent callers should collapse to one fetch")
-	for i := 0; i < concurrency; i++ {
+	assert.Equal(t, int32(1), calls.Load(), "all concurrent callers should collapse to one fetch")
+	for i := range concurrency {
 		require.NoError(t, errs[i])
 		assert.Equal(t, []PRCheckStatus{{Name: "ci/lint"}}, results[i])
 	}
@@ -165,15 +165,15 @@ func TestCheckStatusCache_SingleFlightCollapsesConcurrentFetches(t *testing.T) {
 func TestCheckStatusCache_NonPositiveTTLDisablesCaching(t *testing.T) {
 	c := NewCheckStatusCache(0)
 
-	var calls int32
+	var calls atomic.Int32
 	fetch := func() ([]PRCheckStatus, error) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		return nil, nil
 	}
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		_, err := c.Do("octo/repo", "abc", fetch)
 		require.NoError(t, err)
 	}
-	assert.Equal(t, int32(5), atomic.LoadInt32(&calls), "TTL<=0 should bypass the cache entirely")
+	assert.Equal(t, int32(5), calls.Load(), "TTL<=0 should bypass the cache entirely")
 }
