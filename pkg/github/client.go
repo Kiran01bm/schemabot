@@ -28,25 +28,38 @@ type GitHubClientFactory interface {
 
 // Client handles GitHub App-level operations and creates per-installation clients.
 type Client struct {
-	appID           int64
-	privateKey      []byte
-	logger          *slog.Logger
-	appSlug         string    // fetched from GitHub API at startup, used to identify own check runs
-	lastSlugAttempt time.Time // rate-limits slug fetch retries
+	appID               int64
+	privateKey          []byte
+	logger              *slog.Logger
+	appSlug             string        // fetched from GitHub API at startup, used to identify own check runs
+	lastSlugAttempt     time.Time     // rate-limits slug fetch retries
+	checkStatusCacheTTL time.Duration // per-InstallationClient cache TTL; <=0 disables caching
 }
 
 // slugFetchRetryCooldown is how long to wait between retry attempts when the
 // app slug couldn't be fetched at startup (e.g., GitHub was temporarily down).
 const slugFetchRetryCooldown = 5 * time.Second
 
-// NewClient creates a new GitHub App client and fetches the app's slug from GitHub.
-// If the slug can't be fetched (e.g., GitHub is down), the server still starts but
-// PR applies are blocked by the check gate since we can't identify our own checks.
+// NewClient creates a new GitHub App client with the default per-InstallationClient
+// check-status cache TTL. See NewClientWithCacheTTL for tuning or disabling the cache.
+//
+// Fetches the app's slug from GitHub. If the slug can't be fetched (e.g., GitHub
+// is down), the server still starts but PR applies are blocked by the check gate
+// since we can't identify our own checks.
 func NewClient(appID int64, privateKey []byte, logger *slog.Logger) *Client {
+	return NewClientWithCacheTTL(appID, privateKey, logger, DefaultCheckStatusCacheTTL)
+}
+
+// NewClientWithCacheTTL creates a new GitHub App client with an explicit
+// check-status cache TTL. Pass 0 (or any non-positive duration) to disable
+// the per-InstallationClient cache entirely — every GetPRCheckStatuses call
+// then issues a fresh GraphQL request.
+func NewClientWithCacheTTL(appID int64, privateKey []byte, logger *slog.Logger, checkStatusCacheTTL time.Duration) *Client {
 	c := &Client{
-		appID:      appID,
-		privateKey: privateKey,
-		logger:     logger,
+		appID:               appID,
+		privateKey:          privateKey,
+		logger:              logger,
+		checkStatusCacheTTL: checkStatusCacheTTL,
 	}
 
 	// Fetch the app slug so we can identify our own check runs in statusCheckRollup.
@@ -104,7 +117,7 @@ func (c *Client) ForInstallation(installationID int64) (*InstallationClient, err
 		gql:              githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
 		logger:           c.logger,
 		appSlug:          c.appSlug,
-		checkStatusCache: NewCheckStatusCache(DefaultCheckStatusCacheTTL),
+		checkStatusCache: NewCheckStatusCache(c.checkStatusCacheTTL),
 	}, nil
 }
 
