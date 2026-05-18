@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -287,11 +287,11 @@ func TestFetchPullRequest_CacheCollapsesDuplicateCalls(t *testing.T) {
 	mux.HandleFunc("/repos/octo/repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{
-			"head": {"ref": "feature", "sha": "abc123"},
-			"base": {"ref": "main",    "sha": "def456"},
-			"user": {"login": "octocat"}
-		}`)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"head": map[string]string{"ref": "feature", "sha": "abc123"},
+			"base": map[string]string{"ref": "main", "sha": "def456"},
+			"user": map[string]string{"login": "octocat"},
+		})
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -339,7 +339,11 @@ func TestFetchPullRequest_NoCacheFallsThrough(t *testing.T) {
 	mux.HandleFunc("/repos/octo/repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"head": {"sha": "abc123"}, "base": {}, "user": {}}`)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"head": map[string]string{"sha": "abc123"},
+			"base": map[string]string{},
+			"user": map[string]string{},
+		})
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
