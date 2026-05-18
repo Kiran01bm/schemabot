@@ -493,8 +493,11 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 	if ic.checkStatusCache == nil {
 		rows, err = ic.fetchPRCheckStatuses(ctx, repo, ref)
 	} else {
-		rows, err = ic.checkStatusCache.Do(ctx, repo, ref, func() ([]CachedCheckRow, error) {
-			return ic.fetchPRCheckStatuses(ctx, repo, ref)
+		// The cache supplies its own ctx to the fetch when it owns a
+		// shared singleflight invocation, so a caller cancelling cannot
+		// abort the shared GitHub request and fail unrelated waiters.
+		rows, err = ic.checkStatusCache.Do(ctx, repo, ref, func(fetchCtx context.Context) ([]CachedCheckRow, error) {
+			return ic.fetchPRCheckStatuses(fetchCtx, repo, ref)
 		})
 	}
 	if err != nil {

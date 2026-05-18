@@ -40,7 +40,7 @@ func TestCheckStatusCache_HitsCacheWithinTTL(t *testing.T) {
 	c.now = clock.Now
 
 	var calls atomic.Int32
-	fetch := func() ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
 		calls.Add(1)
 		return []CachedCheckRow{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, nil
 	}
@@ -63,7 +63,7 @@ func TestCheckStatusCache_RefetchesAfterTTL(t *testing.T) {
 	c.now = clock.Now
 
 	var calls atomic.Int32
-	fetch := func() ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
 		calls.Add(1)
 		return []CachedCheckRow{{Name: "ci/lint"}}, nil
 	}
@@ -84,7 +84,7 @@ func TestCheckStatusCache_KeysAreIndependent(t *testing.T) {
 	c.now = newFakeClock().Now
 
 	var calls atomic.Int32
-	fetch := func() ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
 		calls.Add(1)
 		return nil, nil
 	}
@@ -105,7 +105,7 @@ func TestCheckStatusCache_ErrorsAreNotCached(t *testing.T) {
 
 	var calls atomic.Int32
 	wantErr := errors.New("boom")
-	fetch := func() ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
 		n := calls.Add(1)
 		if n < 3 {
 			return nil, wantErr
@@ -131,7 +131,7 @@ func TestCheckStatusCache_SingleFlightCollapsesConcurrentFetches(t *testing.T) {
 	const concurrency = 25
 	var calls atomic.Int32
 	release := make(chan struct{})
-	fetch := func() ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
 		calls.Add(1)
 		<-release // hold open until all goroutines have joined the flight
 		return []CachedCheckRow{{Name: "ci/lint"}}, nil
@@ -175,7 +175,7 @@ func TestCheckStatusCache_WaiterRespectsItsOwnContext(t *testing.T) {
 	var calls atomic.Int32
 	fetchEntered := make(chan struct{})
 	releaseFetch := make(chan struct{})
-	fetch := func() ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
 		calls.Add(1)
 		close(fetchEntered)
 		<-releaseFetch
@@ -236,7 +236,7 @@ func TestCheckStatusCache_StoreEvictsExpiredEntries(t *testing.T) {
 	c := NewCheckStatusCache(time.Minute)
 	c.now = clock.Now
 
-	fetch := func() ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
 		return []CachedCheckRow{{Name: "ci/lint"}}, nil
 	}
 
@@ -262,7 +262,7 @@ func TestCheckStatusCache_LookupEvictsExpiredEntry(t *testing.T) {
 	c := NewCheckStatusCache(time.Minute)
 	c.now = clock.Now
 
-	fetch := func() ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
 		return []CachedCheckRow{{Name: "ci/lint"}}, nil
 	}
 
@@ -320,11 +320,89 @@ func TestGetPRCheckStatuses_RecomputesIsSchemaBotPerCall(t *testing.T) {
 	assert.False(t, postStatuses[1].IsSchemaBot, "third-party check must remain IsSchemaBot=false")
 }
 
+// TestCheckStatusCache_LeaderCancellationDoesNotFailWaiters locks in the
+// invariant that the singleflight shared fetch is decoupled from any
+// individual caller's ctx: the caller that wins the singleflight may
+// cancel or time out without aborting the shared GitHub request and
+// without failing unrelated waiters whose own contexts are still valid.
+func TestCheckStatusCache_LeaderCancellationDoesNotFailWaiters(t *testing.T) {
+	c := NewCheckStatusCache(time.Minute)
+	c.now = newFakeClock().Now
+
+	fetchEntered := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	var fetchCtxCancelled atomic.Bool
+	var calls atomic.Int32
+	fetch := func(fetchCtx context.Context) ([]CachedCheckRow, error) {
+		calls.Add(1)
+		close(fetchEntered)
+		// If the cache were still passing the leader's ctx straight to
+		// fetch, fetchCtx would be cancelled when the leader cancels
+		// below. Observe its state after the cancellation point to
+		// confirm the cache is feeding us a decoupled ctx.
+		<-releaseFetch
+		if fetchCtx.Err() != nil {
+			fetchCtxCancelled.Store(true)
+		}
+		return []CachedCheckRow{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, nil
+	}
+
+	// Leader: cancellable ctx. Wins the singleflight, then cancels
+	// before the shared fetch completes.
+	leaderCtx, leaderCancel := context.WithCancel(t.Context())
+	leaderDone := make(chan struct{})
+	var leaderResult []CachedCheckRow
+	var leaderErr error
+	go func() {
+		defer close(leaderDone)
+		leaderResult, leaderErr = c.Do(leaderCtx, "octo/repo", "abc", fetch)
+	}()
+
+	// Wait until the fetch is actually in flight before starting the
+	// waiter (so we are sure the waiter joins the singleflight group as
+	// a follower, not as the leader).
+	<-fetchEntered
+
+	// Waiter: a separate long-lived ctx. Must observe the shared fetch's
+	// result even though the leader is about to cancel.
+	waiterDone := make(chan struct{})
+	var waiterResult []CachedCheckRow
+	var waiterErr error
+	go func() {
+		defer close(waiterDone)
+		waiterResult, waiterErr = c.Do(t.Context(), "octo/repo", "abc", fetch)
+	}()
+
+	// Cancel the leader before the shared fetch completes. With a
+	// decoupled fetchCtx the shared fetch is unaffected; the leader
+	// itself returns ctx.Canceled via its outer select.
+	leaderCancel()
+
+	<-leaderDone
+	assert.ErrorIs(t, leaderErr, context.Canceled, "leader should observe its own cancellation")
+	assert.Nil(t, leaderResult)
+
+	// Release the shared fetch. The waiter must receive the result
+	// despite the leader having cancelled.
+	close(releaseFetch)
+
+	select {
+	case <-waiterDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter did not receive a result — likely failed by the leader's cancellation")
+	}
+	require.NoError(t, waiterErr, "waiter must not be affected by the leader's cancellation")
+	assert.Equal(t, []CachedCheckRow{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, waiterResult)
+	assert.False(t, fetchCtxCancelled.Load(),
+		"shared fetch's ctx must remain alive after the leader cancels — otherwise the GitHub request would have aborted")
+	assert.Equal(t, int32(1), calls.Load(), "fetch should run exactly once across leader + waiter")
+}
+
 func TestCheckStatusCache_NonPositiveTTLDisablesCaching(t *testing.T) {
 	c := NewCheckStatusCache(0)
 
 	var calls atomic.Int32
-	fetch := func() ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
 		calls.Add(1)
 		return nil, nil
 	}

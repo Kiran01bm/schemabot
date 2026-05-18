@@ -65,6 +65,12 @@ func NewCheckStatusCache(ttl time.Duration) *CheckStatusCache {
 	}
 }
 
+// sharedFetchTimeout bounds the singleflight shared fetch when it is
+// decoupled from individual callers' deadlines. It mirrors the
+// InstallationClient's underlying http.Client timeout so the shared
+// fetch cannot outlive the GitHub round trip it wraps.
+const sharedFetchTimeout = 30 * time.Second
+
 // Do returns the cached rows for (repo, sha) if a fresh entry exists,
 // otherwise invokes fetch and stores its result. Concurrent callers for the
 // same (repo, sha) collapse into a single fetch invocation.
@@ -74,11 +80,20 @@ func NewCheckStatusCache(ttl time.Duration) *CheckStatusCache {
 // promptly with ctx.Err(), without aborting the shared fetch (other waiters
 // and future callers can still receive its result).
 //
+// The shared fetch runs on a ctx that is decoupled from any individual
+// caller's cancellation — built via context.WithoutCancel so the leader's
+// values (tracing/logging) are preserved while its cancellation and
+// deadline are stripped, then bounded by sharedFetchTimeout. This means a
+// caller cancelling or timing out — including the caller that won the
+// singleflight — cannot abort the shared GitHub request and fail unrelated
+// waiters whose own contexts are still valid.
+//
 // When the cache's TTL is non-positive, fetch is invoked on every call and
-// no result is stored.
-func (c *CheckStatusCache) Do(ctx context.Context, repo, sha string, fetch func() ([]CachedCheckRow, error)) ([]CachedCheckRow, error) {
+// no result is stored. In that path fetch runs with the caller's own ctx,
+// since there is no shared fetch to protect.
+func (c *CheckStatusCache) Do(ctx context.Context, repo, sha string, fetch func(context.Context) ([]CachedCheckRow, error)) ([]CachedCheckRow, error) {
 	if c.ttl <= 0 {
-		return fetch()
+		return fetch(ctx)
 	}
 
 	key := repo + "@" + sha
@@ -93,7 +108,11 @@ func (c *CheckStatusCache) Do(ctx context.Context, repo, sha string, fetch func(
 		if rows, ok := c.lookup(key); ok {
 			return rows, nil
 		}
-		rows, err := fetch()
+		// Decouple the shared fetch from the caller's ctx so a leader's
+		// cancellation or timeout does not fail unrelated waiters.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sharedFetchTimeout)
+		defer cancel()
+		rows, err := fetch(fetchCtx)
 		if err != nil {
 			return nil, err
 		}
