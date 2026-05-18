@@ -347,6 +347,26 @@ func TestRenderApplyBlockedByFailingChecks_SingleCheck(t *testing.T) {
 	assert.Contains(t, result, "schemabot apply -e production")
 }
 
+func TestRenderApplyBlockedByFailingChecks_EmptyList(t *testing.T) {
+	// Defensive guard: rendering with an empty slice must not emit an empty
+	// Markdown table (header row with zero data rows). It should fall back
+	// to a generic message that still preserves the header, environment,
+	// and retry block.
+	for _, failing := range [][]BlockingCheck{nil, {}} {
+		result := RenderApplyBlockedByFailingChecks("staging", failing)
+
+		assert.Contains(t, result, "## ❌ Apply Blocked")
+		assert.Contains(t, result, "**Environment**: `staging`")
+		assert.Contains(t, result, "Cannot apply while PR checks are failing.")
+		assert.Contains(t, result, "Fix the failing checks and retry:\n```\nschemabot apply -e staging\n```",
+			"retry command must be inside a fenced code block immediately after the retry copy")
+		assert.NotContains(t, result, "| Check | Status |",
+			"empty-list branch must not emit a table header with no data rows")
+		assert.NotContains(t, result, "|-------|--------|",
+			"empty-list branch must not emit a table separator with no data rows")
+	}
+}
+
 func TestRenderApplyBlockedByCheckStatusError(t *testing.T) {
 	t.Run("generic error is shown verbatim with retry block", func(t *testing.T) {
 		err := errors.New("graphql query failed: 500 Internal Server Error")
@@ -446,6 +466,26 @@ func TestRenderApplyBlockedByInProgressChecks(t *testing.T) {
 	assert.Contains(t, result, "| `CI / integration` | queued |")
 	assert.Contains(t, result, "Wait for checks to complete")
 	assert.Contains(t, result, "schemabot apply -e staging")
+}
+
+func TestRenderApplyBlockedByInProgressChecks_EmptyList(t *testing.T) {
+	// Defensive guard: rendering with an empty slice must not emit an empty
+	// Markdown table (header row with zero data rows). It should fall back
+	// to a generic message that still preserves the header, environment,
+	// and retry block.
+	for _, inProgress := range [][]BlockingCheck{nil, {}} {
+		result := RenderApplyBlockedByInProgressChecks("staging", inProgress)
+
+		assert.Contains(t, result, "## ⏳ Apply Blocked")
+		assert.Contains(t, result, "**Environment**: `staging`")
+		assert.Contains(t, result, "Cannot apply while PR checks are still running.")
+		assert.Contains(t, result, "Wait for checks to complete and retry:\n```\nschemabot apply -e staging\n```",
+			"retry command must be inside a fenced code block immediately after the retry copy")
+		assert.NotContains(t, result, "| Check | Status |",
+			"empty-list branch must not emit a table header with no data rows")
+		assert.NotContains(t, result, "|-------|--------|",
+			"empty-list branch must not emit a table separator with no data rows")
+	}
 }
 
 func TestTruncateDDL(t *testing.T) {
