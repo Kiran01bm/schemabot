@@ -353,16 +353,21 @@ type PullRequestInfo struct {
 	User    string
 }
 
-// FetchPullRequest gets PR information.
+// FetchPullRequest is the dedupe-friendly variant. It honours the
+// request-scoped PR-info cache attached to ctx via WithPRInfoCache, so
+// repeated calls for the same (repo, pr) within one webhook delivery
+// collapse to a single upstream GitHub round trip. Use this for
+// discovery / gate work where consistency-within-a-delivery is required
+// and the cached snapshot is by construction not stale (the cache lives
+// and dies with the delivery's ctx, and a new commit triggers a new
+// delivery with its own fresh cache).
 //
-// When ctx carries a request-scoped PR-info cache (attached via
-// WithPRInfoCache at a webhook entry point), repeated calls for the same
-// (repo, pr) within that scope collapse to a single upstream GitHub call.
-// The cache is intentionally NOT shared across webhook deliveries — a
-// PR's HeadSHA can change between deliveries, and a cross-delivery cache
-// would risk returning a stale HeadSHA to downstream checks-gate and
-// schema-discovery paths. A fresh cache per delivery cannot go stale by
-// construction.
+// For safety re-checks where correctness requires the *current* GitHub
+// HEAD — e.g. the auto-confirm / apply-confirm revalidation, where a
+// new commit pushed after discovery must downgrade to manual
+// confirmation — call FetchPullRequestNoCache instead. Picking the
+// right method at the call site keeps the intent explicit and avoids
+// hidden ctx flags.
 //
 // Callers without a request-scoped cache on ctx (tests, ad-hoc usage)
 // fall through to a raw fetch on every call.
@@ -383,6 +388,21 @@ func (ic *InstallationClient) FetchPullRequest(ctx context.Context, repo string,
 	}
 	cache.set(repo, pr, info)
 	return info, nil
+}
+
+// FetchPullRequestNoCache is the revalidation-friendly variant. It always
+// issues a fresh GitHub request, bypassing any request-scoped PR-info
+// cache attached via WithPRInfoCache. Use this where correctness requires
+// the current GitHub HEAD — for example, the apply -y auto-confirm and
+// apply-confirm SHA re-checks, where a stale cached HeadSHA would let
+// the apply proceed against schema files fetched at an earlier commit
+// instead of downgrading to manual confirmation.
+//
+// Paired with FetchPullRequest (dedupe-friendly) so the call site
+// declares its intent without any hidden ctx-flag magic: discovery work
+// calls FetchPullRequest, safety re-checks call FetchPullRequestNoCache.
+func (ic *InstallationClient) FetchPullRequestNoCache(ctx context.Context, repo string, pr int) (*PullRequestInfo, error) {
+	return ic.fetchPullRequest(ctx, repo, pr)
 }
 
 func (ic *InstallationClient) fetchPullRequest(ctx context.Context, repo string, pr int) (*PullRequestInfo, error) {

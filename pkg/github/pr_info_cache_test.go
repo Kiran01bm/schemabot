@@ -133,6 +133,90 @@ func TestFetchPullRequest_ErrorsAreNotCached(t *testing.T) {
 	assert.Equal(t, int32(3), calls.Load())
 }
 
+// TestFetchPullRequestNoCache_AlwaysHitsGitHubAndDoesNotPoisonCache locks
+// in the dedupe-friendly vs revalidation-friendly contract: the cached
+// variant (FetchPullRequest) returns the request-scoped cached value;
+// the bypassing variant (FetchPullRequestNoCache) always issues a fresh
+// GitHub request even when a cached value exists for the same scope and
+// (repo, pr). The bypassing variant must NOT write its fresh result
+// back into the cache — otherwise discovery sites within the same scope
+// would observe a phantom "second SHA" mid-delivery and lose internal
+// consistency.
+//
+// This is the invariant that defends the auto-confirm / apply-confirm
+// SHA re-checks against the staleness Codex flagged on PR #114: if a
+// new commit lands after CreateSchemaRequestFromPR populates the cache,
+// the revalidation fetch must see the current GitHub HEAD instead of
+// the cached snapshot.
+func TestFetchPullRequestNoCache_AlwaysHitsGitHubAndDoesNotPoisonCache(t *testing.T) {
+	var calls atomic.Int32
+	var headSHA atomic.Value
+	headSHA.Store("abc")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/octo/repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"head": map[string]string{"ref": "feature", "sha": headSHA.Load().(string)},
+			"base": map[string]string{"ref": "main", "sha": "base"},
+			"user": map[string]string{"login": "octocat"},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	ic := newPRTestInstallationClient(t, server)
+	ctx := WithPRInfoCache(t.Context())
+
+	// Discovery phase: populate the cache with HeadSHA=abc.
+	got, err := ic.FetchPullRequest(ctx, "octo/repo", 42)
+	require.NoError(t, err)
+	assert.Equal(t, "abc", got.HeadSHA)
+	assert.Equal(t, int32(1), calls.Load(), "first FetchPullRequest must hit GitHub")
+
+	// Dedupe-friendly second call: cache HIT, no GitHub round trip.
+	got, err = ic.FetchPullRequest(ctx, "octo/repo", 42)
+	require.NoError(t, err)
+	assert.Equal(t, "abc", got.HeadSHA)
+	assert.Equal(t, int32(1), calls.Load(), "second FetchPullRequest must dedupe via the cache")
+
+	// Simulate a new commit landing on the PR branch between discovery
+	// and the auto-confirm / apply-confirm revalidation.
+	headSHA.Store("def")
+
+	// Revalidation-friendly call: must bypass the cache and return def.
+	fresh, err := ic.FetchPullRequestNoCache(ctx, "octo/repo", 42)
+	require.NoError(t, err)
+	assert.Equal(t, "def", fresh.HeadSHA,
+		"FetchPullRequestNoCache must bypass the cache and return the current GitHub HEAD")
+	assert.Equal(t, int32(2), calls.Load(), "FetchPullRequestNoCache must always hit GitHub")
+
+	// Subsequent dedupe-friendly call must still observe the original
+	// cached abc — FetchPullRequestNoCache must NOT have written def
+	// back into the cache and corrupted other discovery callers' view.
+	got, err = ic.FetchPullRequest(ctx, "octo/repo", 42)
+	require.NoError(t, err)
+	assert.Equal(t, "abc", got.HeadSHA,
+		"FetchPullRequestNoCache must not poison the cache with its fresh result")
+	assert.Equal(t, int32(2), calls.Load(), "post-bypass FetchPullRequest must still HIT the original cache entry")
+}
+
+// TestFetchPullRequestNoCache_NoCacheOnContextStillFetches verifies that
+// the bypassing variant works the same way whether or not a request-scoped
+// cache is attached — it always issues a fresh GitHub request.
+func TestFetchPullRequestNoCache_NoCacheOnContextStillFetches(t *testing.T) {
+	server, calls := newPRFakeGitHubServer(t)
+	defer server.Close()
+
+	ic := newPRTestInstallationClient(t, server)
+
+	for range 3 {
+		_, err := ic.FetchPullRequestNoCache(t.Context(), "octo/repo", 42)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, int32(3), calls.Load(), "FetchPullRequestNoCache must hit GitHub on every call regardless of ctx cache state")
+}
+
 // TestFetchPullRequest_ReturnsIndependentCopies verifies that callers
 // within a single scope receive independent *PullRequestInfo values —
 // mutating one must not affect another caller's view.

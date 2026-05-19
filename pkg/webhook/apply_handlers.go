@@ -210,8 +210,14 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		// Check 1: HEAD SHA hasn't changed since auto-plan.
 		// Fail closed: if we can't verify the SHA (missing check record, API error),
 		// downgrade to manual confirmation rather than proceeding with stale data.
+		//
+		// Use FetchPullRequestNoCache here — correctness requires the *current*
+		// GitHub HEAD. The dedupe-friendly FetchPullRequest used by discovery
+		// above would return the cached HeadSHA from CreateSchemaRequestFromPR,
+		// making the SHA gate silently pass against a stale snapshot if a new
+		// commit landed between discovery and this re-check.
 		check, checkErr := h.service.Storage().Checks().Get(ctx, repo, pr, environment, dbType, database)
-		prInfo, prErr := client.FetchPullRequest(ctx, repo, pr)
+		prInfo, prErr := client.FetchPullRequestNoCache(ctx, repo, pr)
 
 		shaVerified := checkErr == nil && prErr == nil && check != nil && prInfo != nil && check.HeadSHA == prInfo.HeadSHA
 		if !shaVerified {
@@ -306,8 +312,14 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 		return
 	}
 
-	// Tier 2: PR checks gate — re-check on confirm to prevent bypass
-	confirmPRInfo, err := client.FetchPullRequest(ctx, repo, pr)
+	// Tier 2: PR checks gate — re-check on confirm to prevent bypass.
+	//
+	// Use FetchPullRequestNoCache here — the whole point of re-checking on
+	// confirm is to use the *current* GitHub HEAD. The dedupe-friendly
+	// FetchPullRequest would return the cached HeadSHA populated by
+	// CreateSchemaRequestFromPR above, making enforcePassingChecks run
+	// against a stale HeadSHA if a new commit landed during this delivery.
+	confirmPRInfo, err := client.FetchPullRequestNoCache(ctx, repo, pr)
 	if err != nil {
 		h.logger.Error("failed to fetch PR for checks gate", "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
