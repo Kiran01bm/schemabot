@@ -56,12 +56,17 @@ type Client struct {
 	installationsMu sync.Mutex
 	installations   map[int64]*InstallationClient
 
-	// checkStatusCache memoises GetPRCheckStatuses results per (repo, sha)
-	// with a short TTL. Shared across every InstallationClient this factory
-	// produces so back-to-back webhook deliveries and command bursts
-	// targeting the same (repo, sha) collapse to a single upstream request
-	// even though each delivery may spawn a fresh InstallationClient.
-	checkStatusCache *CheckStatusCache
+	// checkStatusSingleflight coalesces concurrent GetPRCheckStatuses
+	// calls for the same (repo, sha) into a single upstream request via
+	// singleflight. Shared across every InstallationClient this factory
+	// produces so concurrent webhook deliveries and command bursts
+	// targeting the same commit collapse to a single GraphQL round
+	// trip even though each delivery may spawn a fresh InstallationClient.
+	// Deliberately not a TTL cache: check status is mutable for a SHA
+	// (reruns, late-arriving checks, branch-protection adding required
+	// checks), so any memoisation window would risk converting a
+	// now-failing gate into a passing one.
+	checkStatusSingleflight *CheckStatusSingleflight
 }
 
 // loadAppSlug returns the current app slug, or empty if not yet fetched.
@@ -81,8 +86,7 @@ func (c *Client) storeAppSlug(slug string) {
 // app slug couldn't be fetched at startup (e.g., GitHub was temporarily down).
 const slugFetchRetryCooldown = 5 * time.Second
 
-// NewClient creates a new GitHub App client with the default check-status
-// cache TTL. See NewClientWithCacheTTL for tuning or disabling the cache.
+// NewClient creates a new GitHub App client.
 //
 // Fetches the app's slug from GitHub. If the slug can't be fetched (e.g., GitHub
 // is down), the server still starts but PR applies are blocked by the check gate
@@ -91,27 +95,17 @@ const slugFetchRetryCooldown = 5 * time.Second
 // The returned Client memoises the *InstallationClient it produces by
 // installationID so the underlying http.Client, gh.Client, githubv4.Client, and
 // ghinstallation transport (and its installation-token cache) are reused across
-// webhook deliveries.
+// webhook deliveries. It also owns a CheckStatusSingleflight that is shared
+// across every InstallationClient it produces, so concurrent webhook
+// deliveries and command bursts targeting the same (repo, sha) collapse to a
+// single upstream GraphQL request.
 func NewClient(appID int64, privateKey []byte, logger *slog.Logger) *Client {
-	return NewClientWithCacheTTL(appID, privateKey, logger, DefaultCheckStatusCacheTTL)
-}
-
-// NewClientWithCacheTTL creates a new GitHub App client with an explicit
-// check-status cache TTL. Pass 0 (or any non-positive duration) to disable
-// the cache entirely — every GetPRCheckStatuses call then issues a fresh
-// GraphQL request.
-//
-// The cache is owned by the Client and shared across every InstallationClient
-// the Client produces, so back-to-back webhook deliveries and command bursts
-// targeting the same (repo, sha) collapse to a single upstream request even
-// though each delivery spawns a fresh InstallationClient.
-func NewClientWithCacheTTL(appID int64, privateKey []byte, logger *slog.Logger, checkStatusCacheTTL time.Duration) *Client {
 	c := &Client{
-		appID:            appID,
-		privateKey:       privateKey,
-		logger:           logger,
-		installations:    make(map[int64]*InstallationClient),
-		checkStatusCache: NewCheckStatusCache(checkStatusCacheTTL),
+		appID:                   appID,
+		privateKey:              privateKey,
+		logger:                  logger,
+		installations:           make(map[int64]*InstallationClient),
+		checkStatusSingleflight: NewCheckStatusSingleflight(),
 	}
 	// Seed the atomic with the empty string so loadAppSlug never returns
 	// from a nil pointer.
@@ -197,10 +191,10 @@ func (c *Client) ForInstallation(installationID int64) (*InstallationClient, err
 	httpc := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	ghClient := gh.NewClient(httpc)
 	ic := &InstallationClient{
-		client:           ghClient,
-		gql:              githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
-		logger:           c.logger,
-		checkStatusCache: c.checkStatusCache,
+		client:                  ghClient,
+		gql:                     githubv4.NewEnterpriseClient(graphQLURLFor(ghClient), httpc),
+		logger:                  c.logger,
+		checkStatusSingleflight: c.checkStatusSingleflight,
 	}
 	ic.storeAppSlug(slug)
 	c.installations[installationID] = ic
@@ -248,15 +242,16 @@ type InstallationClient struct {
 	// run on other goroutines.
 	appSlug atomic.Pointer[string]
 
-	// checkStatusCache is owned by the parent Client factory and shared
-	// across every InstallationClient it produces so cache hits accrue
-	// across the short-lived InstallationClients spawned per webhook
-	// delivery. The cache stores identity-independent rows; IsSchemaBot
-	// is re-derived per call against this client's appSlug snapshot, so
-	// a cached entry populated when the app slug was unavailable
-	// correctly reclassifies once the slug is recovered.
-	// Optional: when nil, GetPRCheckStatuses bypasses caching (e.g. tests).
-	checkStatusCache *CheckStatusCache
+	// checkStatusSingleflight is owned by the parent Client factory and
+	// shared across every InstallationClient it produces so concurrent
+	// fetches collapse across the short-lived InstallationClients
+	// spawned per webhook delivery. It delivers identity-independent
+	// rows; IsSchemaBot is re-derived per call against this client's
+	// appSlug snapshot, so a shared fetch delivered to N waiters with
+	// different appSlug snapshots is classified correctly for each.
+	// Optional: when nil, GetPRCheckStatuses bypasses the coalescer
+	// (e.g. tests).
+	checkStatusSingleflight *CheckStatusSingleflight
 }
 
 // loadAppSlug returns the current app slug, or empty if not yet set.
@@ -692,25 +687,27 @@ func (ic *InstallationClient) isOwnAppSlug(slug string) bool {
 // results in a single round trip. SchemaBot's own check runs are identified via
 // the GitHub App slug (more reliable than name matching).
 //
-// Results are served from the Client-shared per-(repo, ref) cache when one
-// is configured, so back-to-back webhook deliveries and command bursts
-// targeting the same commit collapse to a single upstream GraphQL request
-// across every InstallationClient spawned in that window. The cache stores
-// identity-independent rows; IsSchemaBot is re-derived per call against
-// this client's appSlug snapshot so a cached entry populated when the slug
-// was unavailable correctly reclassifies once the slug is recovered.
+// Concurrent calls for the same (repo, ref) collapse to a single upstream
+// GraphQL request via the Client-shared singleflight (when configured), so
+// a webhook delivery or command burst that fans out to multiple gate
+// checks for the same commit makes one round trip — even across the
+// short-lived InstallationClients spawned per delivery. The singleflight
+// delivers identity-independent rows; IsSchemaBot is re-derived per call
+// against this client's appSlug snapshot so a shared fetch delivered to N
+// waiters with different appSlug snapshots is classified correctly for
+// each.
 func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo string, ref string) ([]PRCheckStatus, error) {
 	var (
 		rows []CachedCheckRow
 		err  error
 	)
-	if ic.checkStatusCache == nil {
+	if ic.checkStatusSingleflight == nil {
 		rows, err = ic.fetchPRCheckStatuses(ctx, repo, ref)
 	} else {
-		// The cache supplies its own ctx to the fetch when it owns a
-		// shared singleflight invocation, so a caller cancelling cannot
-		// abort the shared GitHub request and fail unrelated waiters.
-		rows, err = ic.checkStatusCache.Do(ctx, repo, ref, func(fetchCtx context.Context) ([]CachedCheckRow, error) {
+		// The singleflight supplies its own ctx to the fetch so a
+		// caller cancelling cannot abort the shared GitHub request and
+		// fail unrelated waiters.
+		rows, err = ic.checkStatusSingleflight.Do(ctx, repo, ref, func(fetchCtx context.Context) ([]CachedCheckRow, error) {
 			return ic.fetchPRCheckStatuses(fetchCtx, repo, ref)
 		})
 	}
