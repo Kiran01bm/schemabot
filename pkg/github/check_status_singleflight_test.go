@@ -182,6 +182,16 @@ func TestCheckStatusSingleflight_LeaderCancellationDoesNotFailWaiters(t *testing
 		waiterResult, waiterErr = c.Do(t.Context(), "octo/repo", "abc", fetch)
 	}()
 
+	// Ensure the waiter has actually entered DoChan and joined the
+	// singleflight group as a follower before we release the fetch.
+	// Without this the goroutine may not be scheduled in time: the
+	// leader's cancellation chain (cancel → leaderDone → releaseFetch)
+	// can complete, the singleflight key gets deleted, and a
+	// late-scheduled waiter would then start a brand new invocation —
+	// calling fetch a second time and panicking on the already-closed
+	// fetchEntered channel.
+	time.Sleep(50 * time.Millisecond)
+
 	// Cancel the leader before the shared fetch completes. With a
 	// decoupled fetchCtx the shared fetch is unaffected; the leader
 	// itself returns ctx.Canceled via its outer select.
