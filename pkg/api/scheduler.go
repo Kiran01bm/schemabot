@@ -7,181 +7,151 @@ import (
 	"github.com/block/schemabot/pkg/metrics"
 )
 
-// Recovery worker constants.
+// Scheduler constants.
 const (
-	// RecoveryPollInterval is how often we poll for in-progress applies that need recovery.
-	RecoveryPollInterval = 10 * time.Second
+	// SchedulerPollInterval is the default interval for polling applies that need attention.
+	SchedulerPollInterval = 10 * time.Second
 
 	// HeartbeatTimeout is how long since last heartbeat before
 	// an apply is considered to have a crashed worker and needs recovery.
-	// ClaimForRecovery uses this (via SQL: updated_at < NOW() - INTERVAL 1 MINUTE).
+	// FindNextApply uses this (via SQL: updated_at < NOW() - INTERVAL 1 MINUTE).
 	HeartbeatTimeout = 1 * time.Minute
+
+	// DefaultSchedulerWorkers is the number of concurrent scheduler workers
+	// when not configured via scheduler_workers in the server config.
+	DefaultSchedulerWorkers = 4
 )
 
-// StartRecoveryWorker starts a background worker that finds and resumes
-// in-progress applies whose workers crashed.
+// StartScheduler starts the background scheduler worker pool.
 //
-//   - Runs immediately on startup, then polls every 10 seconds
-//   - Finds applies with no heartbeat for 1+ minute (worker crashed)
-//   - Claims them using FOR UPDATE SKIP LOCKED (prevents races)
-//   - Resumes the apply via the appropriate Tern client
-//   - STOPPED applies are NOT auto-resumed (user must call `schemabot start`)
+// Scheduler workers claim apply work from storage so one server can make
+// progress across independent databases and environments concurrently. This
+// currently includes crash recovery for applies with stale heartbeats.
 //
-// This unified approach (vs separate startup + background recovery) ensures:
-//   - No race window if server restarts quickly (within 1 minute of last heartbeat)
-//   - In-progress applies are always recovered once their heartbeat times out
-//
-// Call StopRecoveryWorker to gracefully stop the worker.
-func (s *Service) StartRecoveryWorker(ctx context.Context) {
+// Launches N concurrent workers (configured via scheduler_workers in config).
+// Each worker independently claims applies using FOR UPDATE SKIP LOCKED.
+// Call StopScheduler to gracefully stop.
+func (s *Service) StartScheduler(ctx context.Context) {
 	if s.stopRecovery != nil {
-		s.logger.Info("recovery worker already running")
+		s.logger.Info("scheduler already running")
 		return
 	}
+
+	workers := s.config.SchedulerWorkers
+	if workers <= 0 {
+		workers = DefaultSchedulerWorkers
+	}
+
 	s.stopRecovery = make(chan struct{})
-	s.recoveryWg.Go(func() {
-		ticker := time.NewTicker(RecoveryPollInterval)
-		defer ticker.Stop()
 
-		s.logger.Info("started recovery worker", "interval", RecoveryPollInterval)
+	for i := range workers {
+		workerID := i
+		stop := s.stopRecovery
+		s.recoveryWg.Go(func() {
+			s.schedulerWorker(ctx, workerID, stop)
+		})
+	}
 
-		// On startup, find completed applies that have a progress comment but
-		// no summary comment — this means OnTerminal was missed during a
-		// container restart. Post the missing summary so the PR shows the
-		// completion result.
-		s.postMissingSummaryComments(ctx)
-
-		// Run immediately on startup, then on each tick
-		s.resumeInProgressApplies(ctx)
-
-		for {
-			select {
-			case <-s.stopRecovery:
-				s.logger.Info("stopping recovery worker")
-				return
-			case <-ctx.Done():
-				s.logger.Info("recovery worker context cancelled")
-				return
-			case <-ticker.C:
-				s.resumeInProgressApplies(ctx)
-			}
-		}
-	})
+	s.logger.Info("scheduler started", "workers", workers, "interval", s.schedulerPollInterval)
 }
 
-// StopRecoveryWorker stops the background recovery worker and waits for it to finish.
+// StopScheduler stops the background scheduler and waits for all workers to finish.
 // Safe to call multiple times.
-func (s *Service) StopRecoveryWorker() {
+func (s *Service) StopScheduler() {
 	if s.stopRecovery == nil {
 		return
 	}
-	close(s.stopRecovery)
-	s.stopRecovery = nil
+	stop := s.stopRecovery
+	close(stop)
 	s.recoveryWg.Wait()
+	s.stopRecovery = nil
 }
 
-// resumeInProgressApplies finds and resumes all in-progress applies whose workers crashed.
-// Loops until no more applies need recovery.
-func (s *Service) resumeInProgressApplies(ctx context.Context) {
-	var recovered, failed int
+// schedulerWorker is a single worker that claims at most one apply on startup
+// and on each scheduler poll tick.
+func (s *Service) schedulerWorker(ctx context.Context, workerID int, stop <-chan struct{}) {
+	ticker := time.NewTicker(s.schedulerPollInterval)
+	defer ticker.Stop()
 
-	// Loop until no more applies to recover
+	s.logger.Debug("scheduler worker started", "worker", workerID)
+
+	s.recoverApplies(ctx, workerID)
+
 	for {
-		apply, err := s.storage.Applies().ClaimForRecovery(ctx)
-		if err != nil {
-			s.logger.Error("recovery worker: failed to claim apply", "error", err)
-			break
+		select {
+		case <-stop:
+			s.logger.Debug("scheduler worker stopping", "worker", workerID)
+			return
+		case <-ctx.Done():
+			s.logger.Debug("scheduler worker context cancelled", "worker", workerID)
+			return
+		case <-ticker.C:
+			s.recoverApplies(ctx, workerID)
 		}
-
-		if apply == nil {
-			// No more applies need recovery
-			break
-		}
-
-		s.logger.Info("recovery worker: found in-progress apply with crashed worker",
-			"apply_id", apply.ApplyIdentifier,
-			"database", apply.Database,
-			"environment", apply.Environment,
-			"state", apply.State,
-			"last_heartbeat", apply.UpdatedAt)
-
-		// Get Tern client using the deployment stored on the apply.
-		deployment := s.ResolveDeployment(apply.Database, apply.Deployment)
-		client, err := s.TernClient(deployment, apply.Environment)
-		if err != nil {
-			s.logger.Error("recovery worker: failed to get client",
-				"apply_id", apply.ApplyIdentifier,
-				"database", apply.Database,
-				"environment", apply.Environment,
-				"error", err)
-			failed++
-			continue
-		}
-
-		// Resume the apply
-		if err := client.ResumeApply(ctx, apply); err != nil {
-			s.logger.Error("recovery worker: failed to resume apply",
-				"apply_id", apply.ApplyIdentifier,
-				"database", apply.Database,
-				"error", err)
-			failed++
-			continue
-		}
-
-		s.logger.Info("recovery worker: resumed apply",
-			"apply_id", apply.ApplyIdentifier,
-			"database", apply.Database,
-			"environment", apply.Environment,
-			"previous_state", apply.State)
-
-		// Notify the webhook handler so it can start watching progress and
-		// posting PR comments for the recovered apply.
-		if s.OnApplyRecovered != nil {
-			s.OnApplyRecovered(apply)
-		}
-
-		recovered++
-	}
-
-	metrics.RecordRecoveryCycle(ctx, recovered, failed)
-
-	if recovered > 0 || failed > 0 {
-		s.logger.Info("recovery worker: cycle complete",
-			"recovered", recovered,
-			"failed", failed)
 	}
 }
 
-// postMissingSummaryComments finds completed applies that have a progress comment
-// but no summary comment (the observer missed it during a container restart) and
-// posts the missing summary. Uses the OnMissingSummary callback which posts
-// the summary comment directly.
-func (s *Service) postMissingSummaryComments(ctx context.Context) {
-	applies, err := s.storage.Applies().FindMissingSummaryComment(ctx)
+// recoverApplies claims and resumes applies that need attention.
+// Each call claims one apply (if available) to keep the scheduling loop responsive.
+func (s *Service) recoverApplies(ctx context.Context, workerID int) {
+	apply, err := s.storage.Applies().FindNextApply(ctx)
 	if err != nil {
-		s.logger.Error("recovery worker: failed to find applies missing summary comments", "error", err)
+		s.logger.Error("scheduler: failed to claim apply", "worker", workerID, "error", err)
+		metrics.RecordSchedulerClaimFailure(ctx, "storage_error")
 		return
 	}
 
-	if len(applies) == 0 {
+	if apply == nil {
+		s.logger.Debug("scheduler: no apply to claim", "worker", workerID)
 		return
 	}
 
-	s.logger.Info("recovery worker: found applies missing summary comments", "count", len(applies))
+	start := time.Now()
+	s.logger.Info("scheduler: claimed apply",
+		"worker", workerID,
+		"apply_id", apply.ApplyIdentifier,
+		"database", apply.Database,
+		"environment", apply.Environment,
+		"state", apply.State,
+		"last_heartbeat", apply.UpdatedAt)
 
-	for _, apply := range applies {
-		if apply.Repository == "" || apply.PullRequest == 0 || apply.InstallationID == 0 {
-			// CLI apply or missing GitHub context — can't post a PR comment.
-			continue
-		}
+	previousState := apply.State
 
-		s.logger.Info("recovery worker: posting missing summary comment",
+	deployment := s.ResolveDeployment(apply.Database, apply.Deployment)
+	client, err := s.TernClient(deployment, apply.Environment)
+	if err != nil {
+		s.logger.Error("scheduler: failed to get client",
+			"worker", workerID,
 			"apply_id", apply.ApplyIdentifier,
-			"repo", apply.Repository,
-			"pr", apply.PullRequest,
-			"state", apply.State)
-
-		if s.OnMissingSummary != nil {
-			s.OnMissingSummary(apply)
-		}
+			"database", apply.Database,
+			"environment", apply.Environment,
+			"error", err)
+		metrics.RecordSchedulerResumeFailure(ctx, apply.Database, apply.Environment, "no_client")
+		return
 	}
+
+	if s.OnApplyRecovered != nil {
+		s.OnApplyRecovered(apply)
+	}
+
+	if err := client.ResumeApply(ctx, apply); err != nil {
+		s.logger.Error("scheduler: failed to resume apply",
+			"worker", workerID,
+			"apply_id", apply.ApplyIdentifier,
+			"database", apply.Database,
+			"error", err)
+		metrics.RecordSchedulerResumeFailure(ctx, apply.Database, apply.Environment, "resume_error")
+		return
+	}
+
+	duration := time.Since(start)
+	s.logger.Info("scheduler: resumed apply",
+		"worker", workerID,
+		"apply_id", apply.ApplyIdentifier,
+		"database", apply.Database,
+		"environment", apply.Environment,
+		"previous_state", previousState,
+		"duration", duration)
+	metrics.RecordSchedulerResume(ctx, apply.Database, apply.Environment, previousState)
+	metrics.RecordSchedulerClaimDuration(ctx, duration, apply.Database, apply.Environment, previousState)
 }

@@ -18,6 +18,7 @@ const (
 	ErrCodeStorageError       = "storage_error"        // Storage backend (MySQL) read/write failure
 	ErrCodeEngineUnavailable  = "engine_unavailable"   // Schema change engine (Tern) unreachable or RPC error
 	ErrCodeStateSyncFailed    = "state_sync_failed"    // Operation succeeded but local state sync failed
+	ErrCodeActiveApplyExists  = "active_apply_exists"  // Another active apply already exists for the target
 )
 
 var retryableErrorCodes = map[string]bool{
@@ -80,6 +81,7 @@ type ControlRequest struct {
 	Deployment  string `json:"deployment,omitempty"`
 	Environment string `json:"environment"`
 	ApplyID     string `json:"apply_id,omitempty"`
+	Caller      string `json:"caller,omitempty"`
 }
 
 // VolumeRequest is the HTTP request body for POST /api/volume.

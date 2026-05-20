@@ -84,15 +84,15 @@ type CheckStore interface {
 	UpsertPlanResult(ctx context.Context, check *Check) error
 
 	// CompleteForApply updates stored check state to a terminal state only if
-	// it still belongs to the given apply and no newer non-terminal apply exists
-	// for the same PR/environment/database. Returns false when another worker
-	// changed the stored state first.
+	// it still belongs to the given apply and no newer apply exists for the
+	// same PR/environment/database. Returns false when another worker changed
+	// the stored state first.
 	CompleteForApply(ctx context.Context, check *Check, apply *Apply) (bool, error)
 
 	// MarkActionRequiredForApply marks stored check state action_required after
 	// a rollback only if it still belongs to that rollback apply and no newer
-	// non-terminal apply exists for the same PR/environment/database. Returns
-	// false when another worker changed the stored state first.
+	// apply exists for the same PR/environment/database. Returns false when
+	// another worker changed the stored state first.
 	MarkActionRequiredForApply(ctx context.Context, check *Check, apply *Apply) (bool, error)
 
 	// Get returns stored check state by its unique key (PR + env + database), or nil if not found.
@@ -164,6 +164,8 @@ type PlanStore interface {
 // Applies are created when Apply() is called and updated during execution.
 type ApplyStore interface {
 	// Create stores a new apply and returns its ID.
+	// Returns ErrActiveApplyExists if another active apply already exists for
+	// the same database, database type, and environment.
 	Create(ctx context.Context, apply *Apply) (int64, error)
 
 	// Get returns an apply by ID, or nil if not found.
@@ -184,6 +186,9 @@ type ApplyStore interface {
 	GetByDatabase(ctx context.Context, database, dbType, environment string) ([]*Apply, error)
 
 	// Update updates apply state and fields.
+	// Returns ErrActiveApplyExists when moving an apply into an active state
+	// would overlap another active apply for the same database, database type,
+	// and environment.
 	Update(ctx context.Context, apply *Apply) error
 
 	// GetRecent returns the most recent applies across all databases, ordered by start time desc.
@@ -191,24 +196,24 @@ type ApplyStore interface {
 	GetRecent(ctx context.Context, limit int) ([]*Apply, error)
 
 	// GetInProgress returns all applies in non-terminal states.
-	// Note: For recovery, use ClaimForRecovery which handles locking.
+	// Note: For recovery, use FindNextApply which handles locking.
 	GetInProgress(ctx context.Context) ([]*Apply, error)
 
-	// ClaimForRecovery atomically claims an apply for recovery using heartbeat-based leasing.
-	// Uses FOR UPDATE SKIP LOCKED to prevent race conditions between workers.
-	// Only applies with stale heartbeats (updated_at > 1 minute ago) are claimed.
-	// Returns the claimed apply, or nil if no apply is available to claim.
-	// The caller MUST call Heartbeat periodically (every 10 seconds) to maintain the lease.
-	ClaimForRecovery(ctx context.Context) (*Apply, error)
+	// FindNextApply atomically claims the next apply that needs attention.
+	// A claim selects one stale apply and refreshes its heartbeat in the same
+	// transaction. That heartbeat is the scheduler's lease while it reloads
+	// state and resumes the apply.
+	// Returns the claimed apply, or nil if nothing needs work.
+	FindNextApply(ctx context.Context) (*Apply, error)
 
 	// Heartbeat updates the apply's updated_at timestamp to maintain the lease.
 	// Should be called every 10 seconds while working on an apply.
 	// If not called for > 1 minute, another worker can claim the apply.
 	Heartbeat(ctx context.Context, applyID int64) error
 
-	// FindMissingSummaryComment returns completed/failed applies that have a
-	// progress comment but no summary comment. Used by the recovery worker on
-	// startup to post missing summary comments after container restarts.
+	// FindMissingSummaryComment returns GitHub-backed applies that should have
+	// a terminal summary comment but only have a progress comment. Used by
+	// startup reconciliation to post missing summary comments after restarts.
 	FindMissingSummaryComment(ctx context.Context) ([]*Apply, error)
 
 	// GetByPR returns all applies for a PR.

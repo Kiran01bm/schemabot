@@ -9,6 +9,7 @@ import (
 	"github.com/block/schemabot/pkg/api"
 	"github.com/block/schemabot/pkg/apitypes"
 	ghclient "github.com/block/schemabot/pkg/github"
+	"github.com/block/schemabot/pkg/metrics"
 	"github.com/block/schemabot/pkg/webhook/action"
 	"github.com/block/schemabot/pkg/webhook/templates"
 )
@@ -17,6 +18,8 @@ import (
 func (h *Handler) handlePlanCommand(w http.ResponseWriter, repo string, pr int, environment, databaseName string, installationID int64, requestedBy string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	// Dedupe FetchPullRequest calls within this command invocation.
+	ctx = ghclient.WithPRInfoCache(ctx)
 
 	client, err := h.ghClient.ForInstallation(installationID)
 	if err != nil {
@@ -102,6 +105,8 @@ func (h *Handler) handlePlanCommand(w http.ResponseWriter, repo string, pr int, 
 func (h *Handler) handleMultiEnvPlan(repo string, pr int, databaseName string, installationID int64, requestedBy string, isAutoPlan bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	// Dedupe FetchPullRequest calls within this plan invocation.
+	ctx = ghclient.WithPRInfoCache(ctx)
 
 	client, err := h.ghClient.ForInstallation(installationID)
 	if err != nil {
@@ -138,17 +143,20 @@ func (h *Handler) handleMultiEnvPlan(repo string, pr int, databaseName string, i
 		}
 		environments = config.GetEnvironments()
 	}
+	configuredEnvironments := append([]string(nil), environments...)
+	var allowedEnvironments []string
 
-	// Filter environments to those this instance is allowed to handle
+	// Filter environments to those this service is allowed to handle.
 	if h.service != nil {
 		config := h.service.Config()
+		allowedEnvironments = append([]string(nil), config.AllowedEnvironments...)
 		if len(config.AllowedEnvironments) > 0 {
 			var allowed []string
 			for _, env := range environments {
 				if config.IsEnvironmentAllowed(env) {
 					allowed = append(allowed, env)
 				} else {
-					h.logger.Debug("skipping environment not owned by this instance",
+					h.logger.Debug("skipping environment not allowed for this service",
 						"repo", repo, "pr", pr, "env", env)
 				}
 			}
@@ -157,18 +165,26 @@ func (h *Handler) handleMultiEnvPlan(repo string, pr int, databaseName string, i
 	}
 
 	if len(environments) == 0 {
-		h.logger.Info("no environments to plan after filtering", "repo", repo, "pr", pr)
-		// Post passing aggregates so branch protection isn't blocked waiting
-		// for checks from this instance when the database doesn't have
-		// environments this instance manages.
 		prInfo, err := client.FetchPullRequest(ctx, repo, pr)
 		if err != nil {
-			h.logger.Error("failed to fetch PR for passing aggregate", "repo", repo, "pr", pr, "error", err)
+			h.logger.Error("failed to fetch PR for no allowed configured environments failure",
+				"repo", repo, "pr", pr, "error", err)
 			return
 		}
-		h.postPassingAggregates(ctx, client, repo, pr, prInfo.HeadSHA,
-			"No databases for this environment",
-			"This PR has schema changes, but none of the databases have environments managed by this instance.")
+
+		block := noAllowedConfiguredEnvironmentsBlock
+		metrics.RecordStatusCheckOperation(ctx, metrics.StatusCheckOperation{
+			Operation:  "schema_config_environment_validation",
+			Repository: repo,
+			Status:     "error",
+		})
+		h.logger.Warn("schema changes found but no configured environments are allowed",
+			"repo", repo, "pr", pr, "head_sha", prInfo.HeadSHA,
+			"blocking_reason", block.blockingReason,
+			"configured_environments", configuredEnvironments,
+			"allowed_environments", allowedEnvironments)
+		h.postFailingAggregatesWithBlock(ctx, client, repo, pr, prInfo.HeadSHA,
+			h.aggregateMessagesForAllEnvironments(block.message), block)
 		return
 	}
 
@@ -192,6 +208,8 @@ func (h *Handler) handleMultiEnvPlan(repo string, pr int, databaseName string, i
 		// Set database/type from first successful result
 		if multiEnvData.Database == "" {
 			multiEnvData.Database = schemaResult.Database
+			multiEnvData.HeadSHA = schemaResult.HeadSHA
+			multiEnvData.Repository = schemaResult.Repository
 			multiEnvData.IsMySQL = schemaResult.Type == "mysql"
 		}
 
@@ -305,6 +323,8 @@ func buildPlanCommentData(schema *ghclient.SchemaRequestResult, planResp *apityp
 	data := templates.PlanCommentData{
 		Database:    schema.Database,
 		Environment: environment,
+		HeadSHA:     schema.HeadSHA,
+		Repository:  schema.Repository,
 		RequestedBy: requestedBy,
 		IsMySQL:     schema.Type == "mysql",
 	}

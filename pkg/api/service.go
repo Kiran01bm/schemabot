@@ -94,7 +94,7 @@ func (c TernConfig) Endpoint(deployment, environment string) (string, error) {
 }
 
 // Service is the SchemaBot API service.
-// RecoveryCallback is called after the recovery worker successfully resumes an apply.
+// RecoveryCallback is called after the scheduler claims an apply for recovery.
 // The webhook handler uses this to start watching progress and posting PR comments.
 type RecoveryCallback func(apply *storage.Apply)
 
@@ -105,18 +105,15 @@ type Service struct {
 	ternMu      sync.Mutex             // protects ternClients
 	logger      *slog.Logger
 
-	// Recovery loop management
-	stopRecovery chan struct{}
-	recoveryWg   sync.WaitGroup
+	// Scheduler loop management.
+	stopRecovery          chan struct{}
+	recoveryWg            sync.WaitGroup
+	schedulerPollInterval time.Duration
 
-	// OnApplyRecovered is called after the recovery worker resumes an apply.
-	// Set by the webhook handler to set up an observer for PR comments.
+	// OnApplyRecovered is called after the scheduler claims an apply and before
+	// ResumeApply starts the engine/poller. Set by the webhook handler to attach
+	// an observer for PR comments.
 	OnApplyRecovered RecoveryCallback
-
-	// OnMissingSummary is called on startup for completed applies that have a
-	// progress comment but no summary comment (outbox gap from container restart).
-	// Set by the webhook handler to post the missing summary comment directly.
-	OnMissingSummary RecoveryCallback
 }
 
 // SetApplyObserver sets a progress observer on the tern client for an apply.
@@ -156,11 +153,28 @@ func New(st storage.Storage, config *ServerConfig, ternClients map[string]tern.C
 		ternClients = make(map[string]tern.Client)
 	}
 	return &Service{
-		storage:     st,
-		config:      config,
-		ternClients: ternClients,
-		logger:      logger,
+		storage:               st,
+		config:                config,
+		ternClients:           ternClients,
+		logger:                logger,
+		schedulerPollInterval: SchedulerPollInterval,
 	}
+}
+
+// SetSchedulerPollInterval sets the scheduler worker poll interval.
+// Most deployments should use the default interval; this is a low-level
+// embedding hook for callers that need to tune the scheduler loop directly.
+// Call before StartScheduler so workers create their tickers with the intended
+// interval.
+func (s *Service) SetSchedulerPollInterval(interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("scheduler poll interval must be positive")
+	}
+	if s.stopRecovery != nil {
+		return fmt.Errorf("scheduler already running")
+	}
+	s.schedulerPollInterval = interval
+	return nil
 }
 
 // TernDeployment returns the Tern deployment name for the given repository.
@@ -508,8 +522,8 @@ func (s *Service) Storage() storage.Storage {
 
 // Close closes the service and releases resources.
 func (s *Service) Close() error {
-	// Stop the background recovery worker first
-	s.StopRecoveryWorker()
+	// Stop the scheduler first
+	s.StopScheduler()
 
 	s.ternMu.Lock()
 	var errs []error

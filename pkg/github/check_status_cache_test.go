@@ -302,10 +302,12 @@ func TestGetPRCheckStatuses_RecomputesIsSchemaBotPerCall(t *testing.T) {
 		{Name: "ci/lint", Status: "completed", Conclusion: "failure", AppSlug: "other-ci"},
 	})
 
-	// Client A was spawned before slug recovery (ic.appSlug == "").
-	preRecovery := &InstallationClient{appSlug: "", checkStatusCache: cache}
+	// Client A was spawned before slug recovery (appSlug not yet known).
+	preRecovery := &InstallationClient{checkStatusCache: cache}
+	preRecovery.storeAppSlug("")
 	// Client B is spawned by the same factory after slug recovery succeeded.
-	postRecovery := &InstallationClient{appSlug: "schemabot", checkStatusCache: cache}
+	postRecovery := &InstallationClient{checkStatusCache: cache}
+	postRecovery.storeAppSlug("schemabot")
 
 	preStatuses, err := preRecovery.GetPRCheckStatuses(t.Context(), repo, sha)
 	require.NoError(t, err)
