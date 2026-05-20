@@ -17,14 +17,14 @@ func TestCheckStatusSingleflight_CollapsesConcurrentFetches(t *testing.T) {
 	const concurrency = 25
 	var calls atomic.Int32
 	release := make(chan struct{})
-	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CheckStatusRow, error) {
 		calls.Add(1)
 		<-release // hold open until all goroutines have joined the flight
-		return []CachedCheckRow{{Name: "ci/lint"}}, nil
+		return []CheckStatusRow{{Name: "ci/lint"}}, nil
 	}
 
 	var wg sync.WaitGroup
-	results := make([][]CachedCheckRow, concurrency)
+	results := make([][]CheckStatusRow, concurrency)
 	errs := make([]error, concurrency)
 	for i := range concurrency {
 		wg.Add(1)
@@ -45,7 +45,7 @@ func TestCheckStatusSingleflight_CollapsesConcurrentFetches(t *testing.T) {
 	assert.Equal(t, int32(1), calls.Load(), "all concurrent callers should collapse to one fetch")
 	for i := range concurrency {
 		require.NoError(t, errs[i])
-		assert.Equal(t, []CachedCheckRow{{Name: "ci/lint"}}, results[i])
+		assert.Equal(t, []CheckStatusRow{{Name: "ci/lint"}}, results[i])
 	}
 }
 
@@ -58,9 +58,9 @@ func TestCheckStatusSingleflight_SequentialCallsRefetch(t *testing.T) {
 	c := NewCheckStatusSingleflight()
 
 	var calls atomic.Int32
-	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CheckStatusRow, error) {
 		calls.Add(1)
-		return []CachedCheckRow{{Name: "ci/lint"}}, nil
+		return []CheckStatusRow{{Name: "ci/lint"}}, nil
 	}
 
 	for range 3 {
@@ -81,16 +81,16 @@ func TestCheckStatusSingleflight_WaiterRespectsItsOwnContext(t *testing.T) {
 	var calls atomic.Int32
 	fetchEntered := make(chan struct{})
 	releaseFetch := make(chan struct{})
-	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CheckStatusRow, error) {
 		calls.Add(1)
 		close(fetchEntered)
 		<-releaseFetch
-		return []CachedCheckRow{{Name: "ci/lint"}}, nil
+		return []CheckStatusRow{{Name: "ci/lint"}}, nil
 	}
 
 	// First caller: long-lived ctx, owns the in-flight fetch.
 	firstDone := make(chan struct{})
-	var firstResult []CachedCheckRow
+	var firstResult []CheckStatusRow
 	var firstErr error
 	go func() {
 		defer close(firstDone)
@@ -126,7 +126,7 @@ func TestCheckStatusSingleflight_WaiterRespectsItsOwnContext(t *testing.T) {
 	close(releaseFetch)
 	<-firstDone
 	require.NoError(t, firstErr)
-	assert.Equal(t, []CachedCheckRow{{Name: "ci/lint"}}, firstResult)
+	assert.Equal(t, []CheckStatusRow{{Name: "ci/lint"}}, firstResult)
 	assert.Equal(t, int32(1), calls.Load(), "fetch should still be invoked exactly once")
 }
 
@@ -142,7 +142,7 @@ func TestCheckStatusSingleflight_LeaderCancellationDoesNotFailWaiters(t *testing
 	releaseFetch := make(chan struct{})
 	var fetchCtxCancelled atomic.Bool
 	var calls atomic.Int32
-	fetch := func(fetchCtx context.Context) ([]CachedCheckRow, error) {
+	fetch := func(fetchCtx context.Context) ([]CheckStatusRow, error) {
 		calls.Add(1)
 		close(fetchEntered)
 		// If the coalescer were still passing the leader's ctx straight
@@ -153,14 +153,14 @@ func TestCheckStatusSingleflight_LeaderCancellationDoesNotFailWaiters(t *testing
 		if fetchCtx.Err() != nil {
 			fetchCtxCancelled.Store(true)
 		}
-		return []CachedCheckRow{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, nil
+		return []CheckStatusRow{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, nil
 	}
 
 	// Leader: cancellable ctx. Wins the singleflight, then cancels
 	// before the shared fetch completes.
 	leaderCtx, leaderCancel := context.WithCancel(t.Context())
 	leaderDone := make(chan struct{})
-	var leaderResult []CachedCheckRow
+	var leaderResult []CheckStatusRow
 	var leaderErr error
 	go func() {
 		defer close(leaderDone)
@@ -175,7 +175,7 @@ func TestCheckStatusSingleflight_LeaderCancellationDoesNotFailWaiters(t *testing
 	// Waiter: a separate long-lived ctx. Must observe the shared fetch's
 	// result even though the leader is about to cancel.
 	waiterDone := make(chan struct{})
-	var waiterResult []CachedCheckRow
+	var waiterResult []CheckStatusRow
 	var waiterErr error
 	go func() {
 		defer close(waiterDone)
@@ -211,7 +211,7 @@ func TestCheckStatusSingleflight_LeaderCancellationDoesNotFailWaiters(t *testing
 		t.Fatal("waiter did not receive a result — likely failed by the leader's cancellation")
 	}
 	require.NoError(t, waiterErr, "waiter must not be affected by the leader's cancellation")
-	assert.Equal(t, []CachedCheckRow{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, waiterResult)
+	assert.Equal(t, []CheckStatusRow{{Name: "ci/lint", Status: "completed", Conclusion: "success"}}, waiterResult)
 	assert.False(t, fetchCtxCancelled.Load(),
 		"shared fetch's ctx must remain alive after the leader cancels — otherwise the GitHub request would have aborted")
 	assert.Equal(t, int32(1), calls.Load(), "fetch should run exactly once across leader + waiter")
@@ -242,14 +242,14 @@ func TestGetPRCheckStatuses_RecomputesIsSchemaBotPerWaiter(t *testing.T) {
 	// orchestrate when the shared fetch returns without exercising the
 	// real GraphQL transport.
 	const repo, sha = "octo/repo", "abc123"
-	sharedRows := []CachedCheckRow{
+	sharedRows := []CheckStatusRow{
 		{Name: "schemabot/apply staging", Status: "completed", Conclusion: "success", AppSlug: "schemabot"},
 		{Name: "ci/lint", Status: "completed", Conclusion: "failure", AppSlug: "other-ci"},
 	}
 	fetchEntered := make(chan struct{})
 	releaseFetch := make(chan struct{})
 	var calls atomic.Int32
-	fetch := func(_ context.Context) ([]CachedCheckRow, error) {
+	fetch := func(_ context.Context) ([]CheckStatusRow, error) {
 		calls.Add(1)
 		close(fetchEntered)
 		<-releaseFetch
@@ -309,7 +309,7 @@ func TestGetPRCheckStatuses_RecomputesIsSchemaBotPerWaiter(t *testing.T) {
 // projectRowsForTest mirrors the projection step inside
 // GetPRCheckStatuses so the per-waiter classification test can verify
 // the IsSchemaBot invariant without spinning up a real GraphQL transport.
-func projectRowsForTest(ic *InstallationClient, rows []CachedCheckRow) []PRCheckStatus {
+func projectRowsForTest(ic *InstallationClient, rows []CheckStatusRow) []PRCheckStatus {
 	out := make([]PRCheckStatus, len(rows))
 	for i, r := range rows {
 		out[i] = PRCheckStatus{

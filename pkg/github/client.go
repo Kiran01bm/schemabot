@@ -698,7 +698,7 @@ func (ic *InstallationClient) isOwnAppSlug(slug string) bool {
 // each.
 func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo string, ref string) ([]PRCheckStatus, error) {
 	var (
-		rows []CachedCheckRow
+		rows []CheckStatusRow
 		err  error
 	)
 	if ic.checkStatusSingleflight == nil {
@@ -707,7 +707,7 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 		// The singleflight supplies its own ctx to the fetch so a
 		// caller cancelling cannot abort the shared GitHub request and
 		// fail unrelated waiters.
-		rows, err = ic.checkStatusSingleflight.Do(ctx, repo, ref, func(fetchCtx context.Context) ([]CachedCheckRow, error) {
+		rows, err = ic.checkStatusSingleflight.Do(ctx, repo, ref, func(fetchCtx context.Context) ([]CheckStatusRow, error) {
 			return ic.fetchPRCheckStatuses(fetchCtx, repo, ref)
 		})
 	}
@@ -730,7 +730,7 @@ func (ic *InstallationClient) GetPRCheckStatuses(ctx context.Context, repo strin
 // fetchPRCheckStatuses performs the actual GraphQL round trip for
 // GetPRCheckStatuses, returning identity-independent rows suitable for
 // caching across InstallationClients with different appSlug snapshots.
-func (ic *InstallationClient) fetchPRCheckStatuses(ctx context.Context, repo string, ref string) ([]CachedCheckRow, error) {
+func (ic *InstallationClient) fetchPRCheckStatuses(ctx context.Context, repo string, ref string) ([]CheckStatusRow, error) {
 	owner, repoName := splitRepo(repo)
 
 	vars := map[string]any{
@@ -740,7 +740,7 @@ func (ic *InstallationClient) fetchPRCheckStatuses(ctx context.Context, repo str
 		"after": (*githubv4.String)(nil),
 	}
 
-	var out []CachedCheckRow
+	var out []CheckStatusRow
 	for {
 		var q statusCheckRollupQuery
 		if err := ic.gql.Query(ctx, &q, vars); err != nil {
@@ -750,7 +750,7 @@ func (ic *InstallationClient) fetchPRCheckStatuses(ctx context.Context, repo str
 		for _, n := range contexts.Nodes {
 			switch n.Typename {
 			case "CheckRun":
-				out = append(out, CachedCheckRow{
+				out = append(out, CheckStatusRow{
 					Name:       n.CheckRun.Name,
 					Status:     strings.ToLower(n.CheckRun.Status),
 					Conclusion: strings.ToLower(n.CheckRun.Conclusion),
@@ -758,7 +758,7 @@ func (ic *InstallationClient) fetchPRCheckStatuses(ctx context.Context, repo str
 				})
 			case "StatusContext":
 				status, conclusion := mapLegacyStatusState(n.StatusContext.State)
-				out = append(out, CachedCheckRow{
+				out = append(out, CheckStatusRow{
 					Name:       n.StatusContext.Context,
 					Status:     status,
 					Conclusion: conclusion,

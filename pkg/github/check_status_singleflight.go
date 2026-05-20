@@ -7,7 +7,7 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// CachedCheckRow is the identity-independent slice of statusCheckRollup
+// CheckStatusRow is the identity-independent slice of statusCheckRollup
 // data the singleflight shares across waiters. It deliberately omits
 // IsSchemaBot because that is derived from the calling
 // InstallationClient's appSlug, which is resolved at construction time
@@ -15,7 +15,7 @@ import (
 // this coalescer (e.g. when the slug was unavailable at startup and
 // later recovered). The owning InstallationClient projects to
 // PRCheckStatus on every read.
-type CachedCheckRow struct {
+type CheckStatusRow struct {
 	Name       string
 	Status     string
 	Conclusion string
@@ -71,7 +71,7 @@ const sharedFetchTimeout = 30 * time.Second
 // including the caller that won the singleflight — cannot abort the
 // shared GitHub request and fail unrelated waiters whose own contexts
 // are still valid.
-func (c *CheckStatusSingleflight) Do(ctx context.Context, repo, sha string, fetch func(context.Context) ([]CachedCheckRow, error)) ([]CachedCheckRow, error) {
+func (c *CheckStatusSingleflight) Do(ctx context.Context, repo, sha string, fetch func(context.Context) ([]CheckStatusRow, error)) ([]CheckStatusRow, error) {
 	key := repo + "@" + sha
 
 	ch := c.group.DoChan(key, func() (any, error) {
@@ -87,7 +87,7 @@ func (c *CheckStatusSingleflight) Do(ctx context.Context, repo, sha string, fetc
 		if res.Err != nil {
 			return nil, res.Err
 		}
-		return res.Val.([]CachedCheckRow), nil
+		return res.Val.([]CheckStatusRow), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
