@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -331,11 +332,19 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 	}
 
 	// Reject if the PR HEAD advanced after discovery loaded schema files.
-	// Running against the loaded files would execute DDL derived from an older
-	// commit than the branch is on right now. Release the lock so the user can
-	// re-run `schemabot apply -e <env>` cleanly.
+	// Running against the loaded files would render a plan against an older
+	// commit than the branch is on right now. Release the lock so the user
+	// can re-run `schemabot apply -e <env>` cleanly.
+	//
+	// Use owner-scoped Release rather than ForceRelease: this handler runs on
+	// every PR comment, so a stale-schema rejection on PR #2 must never clear
+	// a lock held by PR #1 for the same target. Release deletes only when
+	// owner matches; ErrLockNotFound / ErrLockNotOwned are expected here
+	// (lock may be absent or held by another PR) and are not logged as errors.
 	if rejected := h.assertSchemaStillCurrent(ctx, repo, pr, installationID, schemaResult, confirmPRInfo.HeadSHA, environment, requestedBy, action.ApplyConfirm); rejected {
-		if relErr := h.service.Storage().Locks().ForceRelease(ctx, schemaResult.Database, schemaResult.Type); relErr != nil {
+		lockOwner := fmt.Sprintf("%s#%d", repo, pr)
+		relErr := h.service.Storage().Locks().Release(ctx, schemaResult.Database, schemaResult.Type, lockOwner)
+		if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
 			h.logger.Error("failed to release lock after stale-schema rejection",
 				"repo", repo, "pr", pr, "database", schemaResult.Database, "database_type", schemaResult.Type, "error", relErr)
 		}

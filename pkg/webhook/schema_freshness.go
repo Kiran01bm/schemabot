@@ -22,7 +22,7 @@ import (
 // If the two SHAs disagree, the discovery snapshot is stale: any plan rendered
 // or apply executed against schema.SchemaFiles would be derived from a commit
 // the branch is no longer on. The helper logs with operator-triage fields,
-// increments schemabot.apply.rejected_stale_schema.total, posts a rejection
+// increments schemabot.schema_freshness.rejected.total, posts a rejection
 // comment, and returns true so the caller can release any locks and stop.
 //
 // Returns true to mean "rejected — caller must stop". Returns false when the
@@ -54,7 +54,7 @@ func (h *Handler) assertSchemaStillCurrent(
 		"requested_by", requestedBy,
 	)
 
-	metrics.RecordApplyRejectedStaleSchema(ctx, metricActionKey(action))
+	metrics.RecordSchemaFreshnessRejected(ctx, metricActionKey(action))
 
 	h.postComment(repo, pr, installationID, templates.RenderStaleSchemaRejection(templates.StaleSchemaRejectionData{
 		RequestedBy:  requestedBy,

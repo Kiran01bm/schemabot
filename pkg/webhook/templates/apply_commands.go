@@ -226,8 +226,8 @@ func RenderStaleSchemaRejection(data StaleSchemaRejectionData) string {
 	writeDBEnvLine(&sb, data.Database, data.Environment)
 	sb.WriteString("\n")
 	fmt.Fprintf(&sb, "Schema files were loaded at `%s`, but the current PR HEAD is `%s`. ", data.DiscoverySHA, data.CurrentSHA)
-	sb.WriteString("Running against the loaded files would apply DDL derived from an older commit than the branch is on right now.\n\n")
-	sb.WriteString("Re-run the command to plan against the current HEAD:\n\n")
+	sb.WriteString("These files no longer match what is on the branch.\n\n")
+	sb.WriteString("Re-run the command to use the current HEAD:\n\n")
 	fmt.Fprintf(&sb, "```\nschemabot %s -e %s\n```\n", data.Action, data.Environment)
 
 	if data.RequestedBy != "" {

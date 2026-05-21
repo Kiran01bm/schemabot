@@ -1326,6 +1326,75 @@ func TestE2EApplyConfirmRejectsWhenHEADAdvanced(t *testing.T) {
 	}
 }
 
+// TestE2EApplyConfirmStaleSchemaPreservesOtherPRLock verifies that when
+// `apply-confirm` runs on PR #1 and the schema-freshness check rejects, the
+// per-target lock held by a different PR (#999) is NOT released. Using
+// owner-scoped Release rather than ForceRelease ensures stale-schema
+// rejections cannot inadvertently clear an unrelated PR's lock.
+func TestE2EApplyConfirmStaleSchemaPreservesOtherPRLock(t *testing.T) {
+	dbName := "webhook_confirm_stale_otherlock"
+	svc := setupE2EService(t, dbName)
+
+	// Pre-seed a lock owned by a different PR (#999).
+	otherOwner := "octocat/hello-world#999"
+	require.NoError(t, svc.Storage().Locks().Acquire(t.Context(), &storage.Lock{
+		DatabaseName: dbName,
+		DatabaseType: "mysql",
+		Repository:   "octocat/hello-world",
+		PullRequest:  999,
+		Owner:        otherOwner,
+	}))
+	t.Cleanup(func() {
+		_ = svc.Storage().Locks().ForceRelease(context.WithoutCancel(t.Context()), dbName, "mysql")
+	})
+
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	client := gh.NewClient(nil)
+	client.BaseURL, _ = url.Parse(server.URL + "/")
+
+	schemabotConfig := fmt.Sprintf("database: %s\ntype: mysql\n", dbName)
+	schemaFiles := map[string]string{
+		"users.sql": "CREATE TABLE `users` (\n  `id` bigint unsigned NOT NULL AUTO_INCREMENT,\n  `name` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+	}
+
+	result := setupFakeGitHubForPlan(t, mux, schemaFiles, schemabotConfig, dbName)
+	// HEAD advances between cached discovery and NoCache fetch, triggering
+	// the stale-schema rejection on PR #1.
+	result.HeadSHAs = []string{"abc123", "newsha456"}
+	h := newE2EHandler(t, svc, client)
+
+	// Webhook delivery for PR #1 — but the lock is held by PR #999.
+	req := buildWebhookRequest(t, webhookPayloadOpts{
+		comment: "schemabot apply-confirm -e staging",
+		isPR:    true,
+	}, nil)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	select {
+	case body := <-result.comments:
+		assert.Contains(t, body, "Rejected", "stale-schema rejection must still post the rejection comment")
+		assert.Contains(t, body, "new commits since discovery")
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for rejection comment")
+	}
+
+	// The other PR's lock must remain intact for the full polling window —
+	// long enough for the handler's owner-scoped Release attempt to land
+	// (and silently no-op as ErrLockNotOwned) before t.Cleanup tears down
+	// the containers. require.Never both asserts the lock is preserved and
+	// synchronises with the async handler so we don't race shutdown.
+	require.Never(t, func() bool {
+		lock, err := svc.Storage().Locks().Get(t.Context(), dbName, "mysql")
+		return err != nil || lock == nil || lock.Owner != otherOwner
+	}, 1*time.Second, 50*time.Millisecond, "other PR's lock must remain intact after stale-schema rejection on PR #1")
+}
+
 // TestE2EPlanRejectsWhenHEADAdvanced verifies that `schemabot plan` rejects
 // (does NOT post a plan comment rendered against stale schema files) when
 // the PR HEAD advances between discovery and the freshness check.
