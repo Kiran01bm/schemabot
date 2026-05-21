@@ -50,6 +50,29 @@ func (h *Handler) handlePlanCommand(w http.ResponseWriter, repo string, pr int, 
 		return
 	}
 
+	// Reject if the PR HEAD advanced after discovery loaded schema files.
+	// Rendering a plan comment against stale files would mislead the user
+	// (and feed directly into apply-confirm against the wrong artifact).
+	// Use FetchPullRequestNoCache: the cached FetchPullRequest used by
+	// discovery would return the discovery-time HeadSHA, masking the race.
+	freshPRInfo, err := client.FetchPullRequestNoCache(ctx, repo, pr)
+	if err != nil {
+		h.logger.Error("failed to fetch PR for stale-schema check", "repo", repo, "pr", pr, "error", err)
+		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
+			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
+			Environment: environment,
+			CommandName: action.Plan,
+			ErrorDetail: "Failed to verify PR HEAD: " + err.Error(),
+		}))
+		h.writeJSON(w, http.StatusOK, map[string]string{"message": "PR fetch failed"})
+		return
+	}
+	if rejected := h.assertSchemaStillCurrent(ctx, repo, pr, installationID, schemaResult, freshPRInfo.HeadSHA, environment, requestedBy, action.Plan); rejected {
+		h.writeJSON(w, http.StatusOK, map[string]string{"message": "plan rejected: schema discovery stale"})
+		return
+	}
+
 	// Build PlanRequest in the format expected by the API service
 	prNumber := int32(pr)
 	planReq := api.PlanRequest{
@@ -208,6 +231,30 @@ func (h *Handler) handleMultiEnvPlan(repo string, pr int, databaseName string, i
 			multiEnvData.HeadSHA = schemaResult.HeadSHA
 			multiEnvData.Repository = schemaResult.Repository
 			multiEnvData.IsMySQL = schemaResult.Type == "mysql"
+
+			// Stale-schema gate for user-triggered `schemabot plan` only.
+			// Auto-plan from pull_request webhooks is covered by the next
+			// synchronize delivery superseding any stale comment; gating it
+			// here is out of scope. All per-env schemaResults share the same
+			// HeadSHA (cached FetchPullRequest within this delivery), so one
+			// check on the first successful result covers every env.
+			if !isAutoPlan {
+				freshPRInfo, prErr := client.FetchPullRequestNoCache(ctx, repo, pr)
+				if prErr != nil {
+					h.logger.Error("failed to fetch PR for stale-schema check",
+						"repo", repo, "pr", pr, "error", prErr)
+					h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
+						RequestedBy: requestedBy,
+						Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
+						CommandName: action.Plan,
+						ErrorDetail: "Failed to verify PR HEAD: " + prErr.Error(),
+					}))
+					return
+				}
+				if rejected := h.assertSchemaStillCurrent(ctx, repo, pr, installationID, schemaResult, freshPRInfo.HeadSHA, env, requestedBy, action.Plan); rejected {
+					return
+				}
+			}
 		}
 
 		prNumber := int32(pr)

@@ -206,34 +206,34 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 
 	// Auto-confirm (-y): check safety conditions before proceeding
 	if result.AutoConfirm {
-		// Check 1: HEAD SHA hasn't changed since auto-plan.
-		// Fail closed: if we can't verify the SHA (missing check record, API error),
-		// downgrade to manual confirmation rather than proceeding with stale data.
+		// Reject if the PR HEAD advanced after discovery loaded schema files.
+		// Running against the loaded files would execute DDL derived from an
+		// older commit than the branch is on right now. Release the lock
+		// acquired above so the user can re-run `schemabot apply -e <env>`
+		// cleanly without a manual unlock.
 		//
-		// Use FetchPullRequestNoCache here — correctness requires the *current*
-		// GitHub HEAD. The dedupe-friendly FetchPullRequest used by discovery
-		// above would return the cached HeadSHA from CreateSchemaRequestFromPR,
-		// making the SHA gate silently pass against a stale snapshot if a new
-		// commit landed between discovery and this re-check.
-		check, checkErr := h.service.Storage().Checks().Get(ctx, repo, pr, environment, dbType, database)
+		// Use FetchPullRequestNoCache: the cached FetchPullRequest used by
+		// discovery would return the discovery-time HeadSHA, masking the race.
 		prInfo, prErr := client.FetchPullRequestNoCache(ctx, repo, pr)
-
-		shaVerified := checkErr == nil && prErr == nil && check != nil && prInfo != nil && check.HeadSHA == prInfo.HeadSHA
-		if !shaVerified {
-			reason := "Could not verify HEAD SHA — confirm manually"
-			if checkErr == nil && prErr == nil && check != nil && prInfo != nil {
-				reason = "New commits pushed since auto-plan"
+		if prErr != nil {
+			h.logger.Error("failed to fetch PR for stale-schema check, releasing lock",
+				"repo", repo, "pr", pr, "database", database, "error", prErr)
+			h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
+				RequestedBy: requestedBy,
+				Environment: environment,
+				CommandName: action.Apply,
+				ErrorDetail: "Failed to verify PR HEAD before auto-confirm: " + prErr.Error(),
+			}))
+			if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+				h.logger.Error("failed to release lock after PR fetch failure",
+					"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
 			}
-			h.logger.Info("auto-confirm downgraded",
-				"repo", repo, "pr", pr, "database", database, "reason", reason)
-			commentData.AutoConfirmDowngradeReason = reason
-			h.postComment(repo, pr, installationID, templates.RenderPlanComment(commentData))
-			headSHA, checkRunErr := h.storeApplyPlanCheckRecord(ctx, client, repo, pr, schemaResult, planResp, environment)
-			if checkRunErr != nil {
-				h.logger.Error("failed to create apply plan check run", "repo", repo, "pr", pr, "error", checkRunErr)
-			}
-			if headSHA != "" {
-				h.updateAggregateCheck(ctx, client, repo, pr, headSHA)
+			return
+		}
+		if rejected := h.assertSchemaStillCurrent(ctx, repo, pr, installationID, schemaResult, prInfo.HeadSHA, environment, requestedBy, action.Apply); rejected {
+			if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+				h.logger.Error("failed to release lock after stale-schema rejection",
+					"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
 			}
 			return
 		}
@@ -329,6 +329,19 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 		}))
 		return
 	}
+
+	// Reject if the PR HEAD advanced after discovery loaded schema files.
+	// Running against the loaded files would execute DDL derived from an older
+	// commit than the branch is on right now. Release the lock so the user can
+	// re-run `schemabot apply -e <env>` cleanly.
+	if rejected := h.assertSchemaStillCurrent(ctx, repo, pr, installationID, schemaResult, confirmPRInfo.HeadSHA, environment, requestedBy, action.ApplyConfirm); rejected {
+		if relErr := h.service.Storage().Locks().ForceRelease(ctx, schemaResult.Database, schemaResult.Type); relErr != nil {
+			h.logger.Error("failed to release lock after stale-schema rejection",
+				"repo", repo, "pr", pr, "database", schemaResult.Database, "database_type", schemaResult.Type, "error", relErr)
+		}
+		return
+	}
+
 	if blocked := h.enforcePassingChecks(ctx, client, repo, pr, installationID, confirmPRInfo.HeadSHA, environment); blocked {
 		return
 	}

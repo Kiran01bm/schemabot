@@ -249,6 +249,27 @@ type planFlowResult struct {
 	comments  chan string
 	reactions chan string
 	checkRuns chan checkRunCapture
+
+	// HeadSHAs drives the SHA returned by /pulls/1 on each successive call.
+	// Empty (the default) means the handler always returns "abc123" — the
+	// historical behavior preserved for all existing tests. Tests that need
+	// to simulate the PR HEAD advancing between the cached FetchPullRequest
+	// call and a later FetchPullRequestNoCache call populate this slice
+	// (e.g. {"abc123", "newsha456"}). Out-of-range calls return the last
+	// element.
+	HeadSHAs    []string
+	headSHACall atomic.Int64
+}
+
+func (p *planFlowResult) nextHeadSHA() string {
+	if len(p.HeadSHAs) == 0 {
+		return "abc123"
+	}
+	idx := int(p.headSHACall.Add(1) - 1)
+	if idx >= len(p.HeadSHAs) {
+		idx = len(p.HeadSHAs) - 1
+	}
+	return p.HeadSHAs[idx]
 }
 
 type checkRunCapture struct {
@@ -287,12 +308,14 @@ func setupFakeGitHubForPlan(t *testing.T, mux *http.ServeMux, schemaSQL map[stri
 		checkRuns: make(chan checkRunCapture, 10),
 	}
 
-	// PR info
+	// PR info — head SHA can shift across calls via result.HeadSHAs (default
+	// preserves the historical "abc123" for every existing test).
 	mux.HandleFunc("GET /repos/octocat/hello-world/pulls/1", func(w http.ResponseWriter, r *http.Request) {
+		sha := result.nextHeadSHA()
 		_ = json.NewEncoder(w).Encode(gh.PullRequest{
 			Head: &gh.PullRequestBranch{
 				Ref: new("feature-branch"),
-				SHA: new("abc123"),
+				SHA: &sha,
 			},
 			Base: &gh.PullRequestBranch{
 				Ref: new("main"),

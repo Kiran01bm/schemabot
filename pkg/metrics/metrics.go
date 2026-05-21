@@ -100,6 +100,39 @@ func RecordApplyDuration(ctx context.Context, duration time.Duration, database, 
 	)
 }
 
+// knownStaleSchemaActions limits metric cardinality on the
+// schemabot.apply.rejected_stale_schema counter to the three handlers that
+// load a schema snapshot at discovery and reuse it at execution.
+var knownStaleSchemaActions = map[string]bool{
+	"plan":          true,
+	"apply":         true,
+	"apply_confirm": true,
+}
+
+// RecordApplyRejectedStaleSchema increments the counter for plan/apply/apply-confirm
+// commands rejected because the PR branch HEAD advanced after discovery loaded the
+// schema files. A spike indicates aggressive force-pushing, webhook replay, or a
+// regression in the schema-freshness guard.
+func RecordApplyRejectedStaleSchema(ctx context.Context, action string) {
+	if !knownStaleSchemaActions[action] {
+		action = "unknown"
+	}
+	meter := otel.Meter(meterName)
+	counter, err := meter.Int64Counter("schemabot.apply.rejected_stale_schema.total",
+		otelmetric.WithDescription("Plan/apply/apply-confirm rejected because PR HEAD advanced after discovery loaded schema files"),
+		otelmetric.WithUnit("{rejection}"),
+	)
+	if err != nil {
+		slog.Warn("failed to create apply rejected stale schema counter", "error", err)
+		return
+	}
+	counter.Add(ctx, 1,
+		otelmetric.WithAttributes(
+			attribute.String("action", action),
+		),
+	)
+}
+
 // knownCheckOwnershipOperations limits metric cardinality to expected check
 // ownership miss paths.
 var knownCheckOwnershipOperations = map[string]bool{

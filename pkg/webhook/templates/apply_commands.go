@@ -204,6 +204,39 @@ func RenderApplyConfirmNoChanges(database, environment string) string {
 	return sb.String()
 }
 
+// StaleSchemaRejectionData contains data for the stale-schema rejection comment
+// posted when the PR HEAD advanced after discovery loaded the schema files.
+type StaleSchemaRejectionData struct {
+	RequestedBy  string
+	Database     string
+	Environment  string
+	DiscoverySHA string
+	CurrentSHA   string
+	Action       string // "plan", "apply", or "apply-confirm" — shown in the retry hint
+}
+
+// RenderStaleSchemaRejection renders a comment when plan/apply/apply-confirm is
+// rejected because the PR branch HEAD advanced after the schema files were loaded
+// at discovery. Tells the user which SHAs were involved and how to retry so
+// discovery picks up the new HEAD.
+func RenderStaleSchemaRejection(data StaleSchemaRejectionData) string {
+	var sb strings.Builder
+
+	sb.WriteString("## ⚠️ Rejected — new commits since discovery\n\n")
+	writeDBEnvLine(&sb, data.Database, data.Environment)
+	sb.WriteString("\n")
+	fmt.Fprintf(&sb, "Schema files were loaded at `%s`, but the current PR HEAD is `%s`. ", data.DiscoverySHA, data.CurrentSHA)
+	sb.WriteString("Running against the loaded files would apply DDL derived from an older commit than the branch is on right now.\n\n")
+	sb.WriteString("Re-run the command to plan against the current HEAD:\n\n")
+	fmt.Fprintf(&sb, "```\nschemabot %s -e %s\n```\n", data.Action, data.Environment)
+
+	if data.RequestedBy != "" {
+		fmt.Fprintf(&sb, "\n_Requested by @%s_\n", data.RequestedBy)
+	}
+
+	return sb.String()
+}
+
 // RenderApplyConfirmNoLock renders a comment when apply-confirm is run without a lock.
 func RenderApplyConfirmNoLock(database, environment string) string {
 	var sb strings.Builder
