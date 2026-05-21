@@ -259,6 +259,14 @@ type planFlowResult struct {
 	// element.
 	HeadSHAs    []string
 	headSHACall atomic.Int64
+
+	// GraphQLHandler optionally overrides the default passing-checks
+	// GraphQL handler installed by setupFakeGitHubForPlan. Tests that need
+	// to drive different check-gate responses across consecutive calls
+	// (e.g. PASS at the early gate, FAIL at the fresh-HEAD re-gate) install
+	// their own handler here before issuing the webhook request. Nil
+	// preserves the default "no checks → passing" behavior.
+	GraphQLHandler atomic.Pointer[http.HandlerFunc]
 }
 
 func (p *planFlowResult) nextHeadSHA() string {
@@ -446,8 +454,24 @@ func setupFakeGitHubForPlan(t *testing.T, mux *http.ServeMux, schemaSQL map[stri
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1})
 	})
 
-	// PR check statuses (all passing) for enforcePassingChecks
-	registerPassingChecks(mux)
+	// PR check statuses for enforcePassingChecks. Defaults to all passing
+	// (empty rollup) so existing tests are unaffected. Tests that need to
+	// drive different responses across calls install a handler in
+	// result.GraphQLHandler before issuing the webhook request.
+	mux.HandleFunc("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		if h := result.GraphQLHandler.Load(); h != nil {
+			(*h)(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"repository": map[string]any{"object": map[string]any{
+				"statusCheckRollup": map[string]any{"contexts": map[string]any{
+					"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
+					"nodes":    []map[string]any{},
+				}},
+			}}},
+		})
+	})
 
 	return result
 }

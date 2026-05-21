@@ -238,6 +238,22 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 			return
 		}
 
+		// Re-evaluate the checks gate against the fresh HEAD before executing.
+		// The early gate at the top of handleApplyCommand ran against the
+		// discovery-time HeadSHA. On the auto-confirm path there is no second
+		// user action between plan and apply, so a required check that
+		// transitioned to failing on the same SHA (e.g. CI re-ran red, or a
+		// new required check was added) would otherwise sneak past. Release
+		// the lock on block so the user can re-run `schemabot apply -e <env>`
+		// once the checks recover, without a manual unlock.
+		if blocked := h.enforcePassingChecks(ctx, client, repo, pr, installationID, prInfo.HeadSHA, environment); blocked {
+			if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+				h.logger.Error("failed to release lock after fresh-HEAD checks gate block",
+					"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
+			}
+			return
+		}
+
 		// Look up the plan we just created for DDL comparison in executeApply.
 		// Fail closed: if we can't load the plan, downgrade to manual confirmation
 		// rather than skipping the DDL drift check entirely.
