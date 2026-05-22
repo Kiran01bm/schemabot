@@ -432,7 +432,12 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 	// confirm-time discovery SHA, because at this point both ends of a
 	// confirm-time-discovery-vs-fresh-HEAD comparison would see the new SHA.
 	//
-	// We've already verified this PR owns the lock, so ForceRelease is safe.
+	// Use owner-scoped Release rather than ForceRelease even though the
+	// ownership check above just succeeded: ownership can change between that
+	// Get and this delete (intervening unlock/reacquire by another PR), and
+	// ForceRelease would clear the new owner's lock. Release deletes only when
+	// owner still matches; ErrLockNotFound / ErrLockNotOwned are expected if
+	// ownership has already changed and are not logged as errors.
 	storedPlan, planLoadErr := h.latestPlanForTarget(ctx, repo, pr, environment, database, dbType)
 	if planLoadErr != nil {
 		h.logger.Error("failed to load stored plan for cross-delivery freshness check",
@@ -446,7 +451,8 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 		return
 	}
 	if rejected := h.assertPlanStillCurrent(ctx, repo, pr, installationID, storedPlan, confirmPRInfo.HeadSHA, environment, requestedBy); rejected {
-		if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+		relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
+		if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
 			h.logger.Error("failed to release lock after stale-plan rejection",
 				"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
 		}

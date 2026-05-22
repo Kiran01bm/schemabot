@@ -82,13 +82,19 @@ func (s *planStore) GetByLock(ctx context.Context, lockID int64) ([]*storage.Pla
 	return nil, nil
 }
 
-// GetByPR returns all plans for a PR.
+// GetByPR returns all plans for a PR, newest first.
+//
+// Ordering is (created_at DESC, id DESC). The id tiebreaker matters: plans.created_at
+// is datetime (second precision), so two plans inserted in the same second would
+// otherwise tie and MySQL could return them in either order. Callers like
+// latestPlanForTarget take the first matching row as "the newest plan" and rely
+// on this deterministic order to avoid picking an older SHA on ties.
 func (s *planStore) GetByPR(ctx context.Context, repo string, pr int) ([]*storage.Plan, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+planColumns+`
 		FROM plans
 		WHERE repository = ? AND pull_request = ?
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 	`, repo, pr)
 	if err != nil {
 		return nil, fmt.Errorf("query plans for %s#%d: %w", repo, pr, err)
