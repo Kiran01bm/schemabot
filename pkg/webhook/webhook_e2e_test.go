@@ -368,10 +368,23 @@ func setupFakeGitHubForPlan(t *testing.T, mux *http.ServeMux, schemaSQL map[stri
 		})
 	}
 
-	// Git tree (recursive)
+	// Git tree (recursive). The exact-SHA handler preserves the historical
+	// "abc123" behavior for tests that only exercise one head; the prefix
+	// fallback serves the same tree for any other SHA so tests that simulate
+	// HEAD advancing (e.g. the cross-delivery freshness checks) don't need a
+	// custom fixture per SHA. Go 1.22 ServeMux gives precedence to the more
+	// specific exact path, so existing tests are unaffected.
 	mux.HandleFunc("GET /repos/octocat/hello-world/git/trees/abc123", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(gh.Tree{
 			SHA:       new("abc123"),
+			Entries:   treeEntries,
+			Truncated: new(false),
+		})
+	})
+	mux.HandleFunc("GET /repos/octocat/hello-world/git/trees/", func(w http.ResponseWriter, r *http.Request) {
+		sha := r.URL.Path[len("/repos/octocat/hello-world/git/trees/"):]
+		_ = json.NewEncoder(w).Encode(gh.Tree{
+			SHA:       &sha,
 			Entries:   treeEntries,
 			Truncated: new(false),
 		})

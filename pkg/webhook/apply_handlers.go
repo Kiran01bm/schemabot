@@ -147,6 +147,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		SchemaFiles: schemaResult.SchemaFiles,
 		Repository:  repo,
 		PullRequest: &prNumber,
+		HeadSHA:     &schemaResult.HeadSHA,
 	}
 
 	planResp, err := h.service.ExecutePlan(ctx, planReq)
@@ -423,6 +424,35 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 		return
 	}
 
+	// Cross-delivery freshness check: reject if the stored plan (the one the
+	// user reviewed) was rendered against a commit that is no longer the PR
+	// HEAD. This closes the window that assertSchemaStillCurrent cannot see —
+	// HEAD advancing between the plan being posted and the user clicking
+	// apply-confirm. We compare against the *stored plan's* SHA, not the
+	// confirm-time discovery SHA, because at this point both ends of a
+	// confirm-time-discovery-vs-fresh-HEAD comparison would see the new SHA.
+	//
+	// We've already verified this PR owns the lock, so ForceRelease is safe.
+	storedPlan, planLoadErr := h.latestPlanForTarget(ctx, repo, pr, environment, database, dbType)
+	if planLoadErr != nil {
+		h.logger.Error("failed to load stored plan for cross-delivery freshness check",
+			"repo", repo, "pr", pr, "database", database, "database_type", dbType, "environment", environment, "error", planLoadErr)
+		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
+			RequestedBy: requestedBy,
+			Environment: environment,
+			CommandName: action.ApplyConfirm,
+			ErrorDetail: "Failed to load stored plan: " + planLoadErr.Error(),
+		}))
+		return
+	}
+	if rejected := h.assertPlanStillCurrent(ctx, repo, pr, installationID, storedPlan, confirmPRInfo.HeadSHA, environment, requestedBy); rejected {
+		if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+			h.logger.Error("failed to release lock after stale-plan rejection",
+				"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
+		}
+		return
+	}
+
 	h.executeApply(ctx, client, repo, pr, schemaResult, environment, installationID, requestedBy, result, nil)
 }
 
@@ -450,6 +480,7 @@ func (h *Handler) executeApply(
 		SchemaFiles: schemaResult.SchemaFiles,
 		Repository:  repo,
 		PullRequest: &prNumber,
+		HeadSHA:     &schemaResult.HeadSHA,
 	}
 
 	planResp, err := h.service.ExecutePlan(ctx, planReq)

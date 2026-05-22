@@ -252,6 +252,12 @@ message PlanRequest {
   // Opaque identifier for endpoint discovery (e.g., database identifier).
   // Forwarded to Tern for provider-based resolution. Defaults to database if empty.
   string target = 8;
+  // PR HEAD SHA at the time schema files were discovered. Persisted on the
+  // stored plan record so apply-confirm can detect the cross-delivery race
+  // where HEAD advances between the plan being posted and the user clicking
+  // apply-confirm. Empty for non-webhook callers (e.g. CLI plan invocations
+  // without a PR context).
+  string head_sha = 9;
 }
 
 // TableChange represents a DDL change to a table.

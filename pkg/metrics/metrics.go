@@ -134,6 +134,34 @@ func RecordSchemaFreshnessRejected(ctx context.Context, action string) {
 	)
 }
 
+// RecordStalePlanRejected increments the counter for apply-confirm commands
+// rejected because the stored plan was rendered against a commit that is no
+// longer the PR HEAD (the cross-delivery race: HEAD advanced between the
+// confirmation plan being posted and the user clicking apply-confirm).
+//
+// Distinct from RecordSchemaFreshnessRejected: the schema-freshness metric
+// fires when discovery loses a race within one webhook delivery. This metric
+// fires when the user-approved plan itself has been outpaced by new commits
+// across deliveries. A spike here indicates humans pushing aggressively
+// during PR review; sustained activity suggests reviewers need a tighter
+// "freeze the branch" workflow during apply confirmation.
+func RecordStalePlanRejected(ctx context.Context) {
+	meter := otel.Meter(meterName)
+	counter, err := meter.Int64Counter("schemabot.command.rejected_stale_plan.total",
+		otelmetric.WithDescription("apply-confirm rejected because PR HEAD advanced after the confirmation plan was posted"),
+		otelmetric.WithUnit("{rejection}"),
+	)
+	if err != nil {
+		slog.Warn("failed to create stale plan rejected counter", "error", err)
+		return
+	}
+	counter.Add(ctx, 1,
+		otelmetric.WithAttributes(
+			attribute.String("action", "apply_confirm"),
+		),
+	)
+}
+
 // knownCheckOwnershipOperations limits metric cardinality to expected check
 // ownership miss paths.
 var knownCheckOwnershipOperations = map[string]bool{

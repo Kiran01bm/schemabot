@@ -82,6 +82,7 @@ func (h *Handler) handlePlanCommand(w http.ResponseWriter, repo string, pr int, 
 		SchemaFiles: schemaResult.SchemaFiles,
 		Repository:  repo,
 		PullRequest: &prNumber,
+		HeadSHA:     &schemaResult.HeadSHA,
 	}
 
 	// Execute plan via the service
@@ -266,6 +267,7 @@ func (h *Handler) handleMultiEnvPlan(repo string, pr int, databaseName string, i
 			SchemaFiles: schemaResult.SchemaFiles,
 			Repository:  repo,
 			PullRequest: &prNumber,
+			HeadSHA:     &schemaResult.HeadSHA,
 		}
 
 		planResp, err := h.service.ExecutePlan(ctx, planReq)

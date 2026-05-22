@@ -224,6 +224,17 @@ type Plan struct {
 	// The key is the database/schema name for MySQL, or keyspace name for Vitess.
 	Namespaces map[string]*NamespacePlanData
 
+	// HeadSHA is the PR HEAD SHA at the time the plan was rendered. It is the
+	// durable record of "which commit did the user actually review". apply-confirm
+	// compares this against the current PR HEAD (via FetchPullRequestNoCache) to
+	// catch the cross-delivery race where HEAD advances between the plan being
+	// posted and the user clicking apply-confirm.
+	//
+	// Empty for plans created before this column existed. Callers that enforce the
+	// cross-delivery freshness invariant must treat an empty value as "skip" (the
+	// invariant cannot be evaluated) rather than fail closed.
+	HeadSHA string
+
 	// CreatedAt is when the plan was generated.
 	CreatedAt time.Time
 }

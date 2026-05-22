@@ -15,7 +15,7 @@ import (
 
 // planColumns lists all columns for SELECT queries.
 const planColumns = `id, plan_identifier, database_name, database_type,
-	deployment, target, repository, pull_request, environment, schema_files, plan_data, created_at`
+	deployment, target, repository, pull_request, environment, schema_files, plan_data, head_sha, created_at`
 
 // planStore implements storage.PlanStore using MySQL.
 type planStore struct {
@@ -35,9 +35,9 @@ func (s *planStore) Create(ctx context.Context, plan *storage.Plan) (int64, erro
 	}
 
 	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO plans (plan_identifier, database_name, database_type, deployment, target, repository, pull_request, environment, schema_files, plan_data, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, plan.PlanIdentifier, plan.Database, plan.DatabaseType, plan.Deployment, plan.Target, plan.Repository, plan.PullRequest, plan.Environment, string(schemaFilesJSON), string(planDataJSON), plan.CreatedAt)
+		INSERT INTO plans (plan_identifier, database_name, database_type, deployment, target, repository, pull_request, environment, schema_files, plan_data, head_sha, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, plan.PlanIdentifier, plan.Database, plan.DatabaseType, plan.Deployment, plan.Target, plan.Repository, plan.PullRequest, plan.Environment, string(schemaFilesJSON), string(planDataJSON), plan.HeadSHA, plan.CreatedAt)
 	if err != nil {
 		if isDuplicateKeyError(err) {
 			return 0, storage.ErrPlanIDExists
@@ -153,6 +153,7 @@ func scanPlanInto(s scanner) (*storage.Plan, error) {
 		&plan.Environment,
 		&schemaFilesJSON,
 		&planDataJSON,
+		&plan.HeadSHA,
 		&plan.CreatedAt,
 	)
 	if err != nil {

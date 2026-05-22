@@ -1557,6 +1557,214 @@ func TestE2EPlanRejectsWhenHEADAdvanced(t *testing.T) {
 	}
 }
 
+// TestE2EApplyConfirmRejectsWhenPlanSHAStale verifies the cross-delivery
+// freshness guard: apply-confirm rejects (no apply, lock released) when the
+// stored plan was rendered against an older commit than the current PR HEAD.
+//
+// This is the window assertSchemaStillCurrent cannot see: HEAD advances
+// between the confirmation plan being posted and the user clicking
+// apply-confirm. At confirm time the within-delivery comparison
+// (confirm-time discovery vs fresh fetch) sees the same new SHA on both
+// sides and passes — but the plan the user actually reviewed was rendered
+// for the old commit. The guard catches this by comparing the stored plan's
+// HeadSHA against the fresh PR HEAD.
+//
+// Scenario:
+//  1. A prior `apply` was already issued; it stored a plan rendered at
+//     "abc123" (seeded directly), posted the confirmation comment, and left
+//     an action_required check + an owned lock behind.
+//  2. The PR HEAD has since advanced to "newsha456" (all fake-GitHub calls
+//     in this test return "newsha456", so the within-delivery check passes).
+//  3. The user comments `schemabot apply-confirm -e staging`.
+//
+// Expected: rejection comment naming both SHAs, lock released, no apply
+// started, metric incremented.
+func TestE2EApplyConfirmRejectsWhenPlanSHAStale(t *testing.T) {
+	dbName := "webhook_confirm_stale_plan"
+	svc := setupE2EService(t, dbName)
+
+	// Seed a check record matching what storeApplyPlanCheckRecord would have
+	// created when the original `apply` posted the confirmation comment.
+	seedCheck(t, svc, dbName, "staging", "action_required")
+
+	// Seed the lock owned by this PR (from the prior `apply`).
+	require.NoError(t, svc.Storage().Locks().Acquire(t.Context(), &storage.Lock{
+		DatabaseName: dbName,
+		DatabaseType: "mysql",
+		Repository:   "octocat/hello-world",
+		PullRequest:  1,
+		Owner:        "octocat/hello-world#1",
+	}))
+	t.Cleanup(func() {
+		_ = svc.Storage().Locks().ForceRelease(context.WithoutCancel(t.Context()), dbName, "mysql")
+	})
+
+	// Seed the stored plan rendered at the OLD HEAD ("abc123"). This is the
+	// plan the user reviewed; the cross-delivery guard must reject when the
+	// fresh HEAD no longer matches.
+	planID, err := svc.Storage().Plans().Create(t.Context(), &storage.Plan{
+		PlanIdentifier: "plan_stale_abc123",
+		Database:       dbName,
+		DatabaseType:   "mysql",
+		Deployment:     dbName,
+		Target:         dbName,
+		Repository:     "octocat/hello-world",
+		PullRequest:    1,
+		Environment:    "staging",
+		HeadSHA:        "abc123",
+		CreatedAt:      time.Now(),
+	})
+	require.NoError(t, err)
+	require.NotZero(t, planID)
+
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	client := gh.NewClient(nil)
+	client.BaseURL, _ = url.Parse(server.URL + "/")
+
+	schemabotConfig := fmt.Sprintf("database: %s\ntype: mysql\n", dbName)
+	schemaFiles := map[string]string{
+		"users.sql": "CREATE TABLE `users` (\n  `id` bigint unsigned NOT NULL AUTO_INCREMENT,\n  `name` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+	}
+
+	result := setupFakeGitHubForPlan(t, mux, schemaFiles, schemabotConfig, dbName)
+	// Every FetchPullRequest in this delivery returns "newsha456" — the
+	// within-delivery check (assertSchemaStillCurrent) therefore passes. The
+	// cross-delivery guard must still reject because the stored plan's
+	// HeadSHA ("abc123") doesn't match.
+	result.HeadSHAs = []string{"newsha456"}
+	h := newE2EHandler(t, svc, client)
+
+	req := buildWebhookRequest(t, webhookPayloadOpts{
+		comment: "schemabot apply-confirm -e staging",
+		isPR:    true,
+	}, nil)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	select {
+	case body := <-result.comments:
+		assert.Contains(t, body, "Rejected")
+		assert.Contains(t, body, "the plan you confirmed is stale",
+			"comment must explain that the stored plan, not just discovery, is stale")
+		assert.Contains(t, body, "abc123", "must show the stored plan's SHA")
+		assert.Contains(t, body, "newsha456", "must show the current PR HEAD")
+		assert.Contains(t, body, "schemabot apply -e staging",
+			"retry hint must point at `apply` (a fresh plan is needed), not `apply-confirm`")
+		assert.NotContains(t, body, "Schema Change In Progress", "apply must not have started")
+		assert.NotContains(t, body, "Schema Change Applied", "apply must not have completed")
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for rejection comment")
+	}
+
+	// Lock owned by this PR must be released so the user can re-issue `apply`.
+	require.Eventually(t, func() bool {
+		lock, err := svc.Storage().Locks().Get(t.Context(), dbName, "mysql")
+		return err == nil && lock == nil
+	}, 5*time.Second, 50*time.Millisecond, "lock must be released after stale-plan rejection")
+
+	// No apply record must have been created — executeApply must not have run.
+	applies, err := svc.Storage().Applies().GetByPR(t.Context(), "octocat/hello-world", 1)
+	require.NoError(t, err)
+	for _, a := range applies {
+		assert.NotEqual(t, dbName, a.Database, "no apply for %s should have been started", dbName)
+	}
+}
+
+// TestE2EApplyConfirmStalePlanPreservesOtherPRLock is the cross-delivery
+// sibling of TestE2EApplyConfirmStaleSchemaPreservesOtherPRLock: it locks in
+// the lock-release semantics on the cross-delivery path.
+//
+// Today the cross-delivery guard releases via ForceRelease because the
+// release fires only AFTER the lock-ownership check has verified that this
+// PR holds the lock. This test pins that invariant: pre-seed a lock owned
+// by a different PR (#999), trigger a stale-plan condition on PR #1, and
+// assert PR #999's lock is preserved. If a future refactor moves the
+// cross-delivery check above the ownership gate (e.g. to "fail fast" before
+// loading the lock), this test will fail and force the author to either
+// keep the ordering or switch to owner-scoped Release at the same time.
+func TestE2EApplyConfirmStalePlanPreservesOtherPRLock(t *testing.T) {
+	dbName := "webhook_confirm_stale_plan_otherlock"
+	svc := setupE2EService(t, dbName)
+
+	seedCheck(t, svc, dbName, "staging", "action_required")
+
+	// Lock held by a different PR.
+	otherOwner := "octocat/hello-world#999"
+	require.NoError(t, svc.Storage().Locks().Acquire(t.Context(), &storage.Lock{
+		DatabaseName: dbName,
+		DatabaseType: "mysql",
+		Repository:   "octocat/hello-world",
+		PullRequest:  999,
+		Owner:        otherOwner,
+	}))
+	t.Cleanup(func() {
+		_ = svc.Storage().Locks().ForceRelease(context.WithoutCancel(t.Context()), dbName, "mysql")
+	})
+
+	// Stored plan for PR #1 rendered at the OLD HEAD.
+	_, err := svc.Storage().Plans().Create(t.Context(), &storage.Plan{
+		PlanIdentifier: "plan_stale_pr1_abc123",
+		Database:       dbName,
+		DatabaseType:   "mysql",
+		Deployment:     dbName,
+		Target:         dbName,
+		Repository:     "octocat/hello-world",
+		PullRequest:    1,
+		Environment:    "staging",
+		HeadSHA:        "abc123",
+		CreatedAt:      time.Now(),
+	})
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	client := gh.NewClient(nil)
+	client.BaseURL, _ = url.Parse(server.URL + "/")
+
+	schemabotConfig := fmt.Sprintf("database: %s\ntype: mysql\n", dbName)
+	schemaFiles := map[string]string{
+		"users.sql": "CREATE TABLE `users` (\n  `id` bigint unsigned NOT NULL AUTO_INCREMENT,\n  `name` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+	}
+
+	result := setupFakeGitHubForPlan(t, mux, schemaFiles, schemabotConfig, dbName)
+	result.HeadSHAs = []string{"newsha456"}
+	h := newE2EHandler(t, svc, client)
+
+	// PR #1 attempts apply-confirm; the lock is held by PR #999 so the
+	// ownership check rejects first (before the cross-delivery plan check
+	// even runs). The lock-conflict comment is posted, but PR #999's lock
+	// must remain untouched.
+	req := buildWebhookRequest(t, webhookPayloadOpts{
+		comment: "schemabot apply-confirm -e staging",
+		isPR:    true,
+	}, nil)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	// Drain whatever comment the handler posts (lock-conflict or stale-plan,
+	// depending on guard ordering); the assertion that matters is that the
+	// other PR's lock survives.
+	select {
+	case <-result.comments:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for any comment")
+	}
+
+	require.Never(t, func() bool {
+		lock, err := svc.Storage().Locks().Get(t.Context(), dbName, "mysql")
+		return err != nil || lock == nil || lock.Owner != otherOwner
+	}, 1*time.Second, 50*time.Millisecond, "other PR's lock must remain intact after stale-plan handling on PR #1")
+}
+
 // TestE2EApplyThreeEnvEnforcement verifies that checkPriorEnvironments checks ALL
 // prior environments, not just the immediately previous one. Uses 3 environments
 // (sandbox → staging → production) and calls checkPriorEnvironments directly

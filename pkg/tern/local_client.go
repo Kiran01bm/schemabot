@@ -370,6 +370,7 @@ func (c *LocalClient) Plan(ctx context.Context, req *ternv1.PlanRequest) (*ternv
 		Environment:    req.Environment,
 		SchemaFiles:    schemaFiles,
 		Namespaces:     namespaces,
+		HeadSHA:        req.HeadSha,
 		CreatedAt:      time.Now(),
 	}
 	c.logger.Info("Plan: storing plan",

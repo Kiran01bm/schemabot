@@ -30,6 +30,11 @@ type PlanRequest struct {
 	SchemaFiles map[string]*ternv1.SchemaFiles `json:"schema_files"`
 	Repository  string                         `json:"repository,omitempty"`
 	PullRequest *int32                         `json:"pull_request,omitempty"`
+	// HeadSHA is the PR HEAD SHA at the time the schema files were discovered.
+	// Persisted on the plan record and used at apply-confirm time to detect the
+	// cross-delivery race where HEAD advances between plan and confirm.
+	// Optional — absent for non-webhook callers (e.g. CLI plan invocations without a PR).
+	HeadSHA *string `json:"head_sha,omitempty"`
 }
 
 // ApplyRequest is the HTTP request body for POST /api/apply.
@@ -141,6 +146,9 @@ func (s *Service) ExecutePlan(ctx context.Context, req PlanRequest) (*apitypes.P
 	if req.PullRequest != nil {
 		ternReq.PullRequest = *req.PullRequest
 	}
+	if req.HeadSHA != nil {
+		ternReq.HeadSha = *req.HeadSHA
+	}
 
 	s.logger.Info("ExecutePlan: calling client.Plan",
 		"database", req.Database,
@@ -193,6 +201,7 @@ func (s *Service) ExecutePlan(ctx context.Context, req PlanRequest) (*apitypes.P
 		Environment:    req.Environment,
 		SchemaFiles:    protoToSchemaFiles(req.SchemaFiles),
 		Namespaces:     protoChangesToNamespaces(resp.Changes),
+		HeadSHA:        ternReq.HeadSha,
 		CreatedAt:      time.Now(),
 	}
 	if _, err := s.storage.Plans().Create(ctx, storedPlan); err != nil && !errors.Is(err, storage.ErrPlanIDExists) {

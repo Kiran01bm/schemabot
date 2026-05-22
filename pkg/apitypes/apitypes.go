@@ -61,6 +61,11 @@ type PlanRequest struct {
 	SchemaFiles map[string]*SchemaFiles `json:"schema_files"`
 	Repository  string                  `json:"repository,omitempty"`
 	PullRequest *int32                  `json:"pull_request,omitempty"`
+	// HeadSHA is the PR HEAD SHA at the time the schema files were discovered.
+	// Persisted on the plan record and used at apply-confirm time to detect the
+	// cross-delivery race where HEAD advances between plan and confirm.
+	// Optional — absent for non-webhook callers (e.g. CLI plan invocations without a PR).
+	HeadSHA *string `json:"head_sha,omitempty"`
 }
 
 // ApplyRequest is the HTTP request body for POST /api/apply.

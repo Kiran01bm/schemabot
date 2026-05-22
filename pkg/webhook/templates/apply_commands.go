@@ -237,6 +237,40 @@ func RenderStaleSchemaRejection(data StaleSchemaRejectionData) string {
 	return sb.String()
 }
 
+// StalePlanRejectionData contains data for the stale-plan rejection comment
+// posted when apply-confirm detects that the PR HEAD has advanced since the
+// confirmation plan was posted (the cross-delivery race).
+type StalePlanRejectionData struct {
+	RequestedBy string
+	Database    string
+	Environment string
+	PlanSHA     string // SHA the confirmation plan was rendered against
+	CurrentSHA  string // current PR HEAD at apply-confirm time
+}
+
+// RenderStalePlanRejection renders a comment when apply-confirm is rejected
+// because the stored plan was rendered against a commit that is no longer the
+// PR HEAD. Distinct from the within-delivery RenderStaleSchemaRejection: this
+// fires across deliveries, so the operator framing is "the plan you confirmed
+// is now stale" rather than "discovery just lost a race".
+func RenderStalePlanRejection(data StalePlanRejectionData) string {
+	var sb strings.Builder
+
+	sb.WriteString("## ⚠️ Rejected — the plan you confirmed is stale\n\n")
+	writeDBEnvLine(&sb, data.Database, data.Environment)
+	sb.WriteString("\n")
+	fmt.Fprintf(&sb, "The confirmation plan was rendered at `%s`, but the current PR HEAD is `%s`. ", data.PlanSHA, data.CurrentSHA)
+	sb.WriteString("New commits have landed since the plan was posted, so the DDL you reviewed no longer matches what is on the branch.\n\n")
+	sb.WriteString("Re-run `apply` to generate a fresh plan against the current HEAD:\n\n")
+	fmt.Fprintf(&sb, "```\nschemabot apply -e %s\n```\n", data.Environment)
+
+	if data.RequestedBy != "" {
+		fmt.Fprintf(&sb, "\n_Requested by @%s_\n", data.RequestedBy)
+	}
+
+	return sb.String()
+}
+
 // RenderApplyConfirmNoLock renders a comment when apply-confirm is run without a lock.
 func RenderApplyConfirmNoLock(database, environment string) string {
 	var sb strings.Builder
