@@ -273,6 +273,40 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		return
 	}
 
+	// Manual apply: reject if the PR HEAD advanced after discovery loaded
+	// schema files. Posting the confirmation plan against the loaded files
+	// would render DDL for a commit the branch is no longer on — and the
+	// user's subsequent `apply-confirm` does its own fresh discovery, so the
+	// confirm-time freshness check passes against the new HEAD even though
+	// the plan the user reviewed was rendered for the old commit. Catching
+	// it here is the symmetric guard to the auto-confirm branch above.
+	// Use FetchPullRequestNoCache; the cached fetch returns the discovery
+	// SHA. The lock was acquired by this handler invocation, so ForceRelease
+	// is safe.
+	prInfo, prErr := client.FetchPullRequestNoCache(ctx, repo, pr)
+	if prErr != nil {
+		h.logger.Error("failed to fetch PR for stale-schema check, releasing lock",
+			"repo", repo, "pr", pr, "database", database, "error", prErr)
+		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
+			RequestedBy: requestedBy,
+			Environment: environment,
+			CommandName: action.Apply,
+			ErrorDetail: "Failed to verify PR HEAD before posting plan: " + prErr.Error(),
+		}))
+		if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+			h.logger.Error("failed to release lock after PR fetch failure",
+				"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
+		}
+		return
+	}
+	if rejected := h.assertSchemaStillCurrent(ctx, repo, pr, installationID, schemaResult, prInfo.HeadSHA, environment, requestedBy, action.Apply); rejected {
+		if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+			h.logger.Error("failed to release lock after stale-schema rejection",
+				"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
+		}
+		return
+	}
+
 	h.postComment(repo, pr, installationID, templates.RenderPlanComment(commentData))
 
 	// Create check run (action_required — waiting for apply-confirm) and update aggregate

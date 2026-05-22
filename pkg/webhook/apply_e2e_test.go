@@ -1326,6 +1326,76 @@ func TestE2EApplyConfirmRejectsWhenHEADAdvanced(t *testing.T) {
 	}
 }
 
+// TestE2EApplyManualRejectsWhenHEADAdvanced verifies that `schemabot apply`
+// (without -y) rejects and releases the lock when the PR HEAD advances
+// between discovery and the freshness check, instead of posting a stale
+// confirmation plan that the user might `apply-confirm` against. Symmetric
+// to TestE2EApplyAutoConfirmRejectsWhenHEADAdvanced but covers the manual
+// (non-auto-confirm) path that aparajon flagged in PR #134 review.
+//
+// Without this guard, a fresh discovery at apply-confirm time would see the
+// new HEAD and the confirm-time freshness check would pass — but the plan
+// the user reviewed was rendered for the old commit.
+func TestE2EApplyManualRejectsWhenHEADAdvanced(t *testing.T) {
+	dbName := "webhook_manual_apply_stale"
+	svc := setupE2EService(t, dbName)
+
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	client := gh.NewClient(nil)
+	client.BaseURL, _ = url.Parse(server.URL + "/")
+
+	schemabotConfig := fmt.Sprintf("database: %s\ntype: mysql\n", dbName)
+	schemaFiles := map[string]string{
+		"users.sql": "CREATE TABLE `users` (\n  `id` bigint unsigned NOT NULL AUTO_INCREMENT,\n  `name` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+	}
+
+	result := setupFakeGitHubForPlan(t, mux, schemaFiles, schemabotConfig, dbName)
+	// Discovery (cached FetchPullRequest) sees abc123; the NoCache fetch
+	// just before posting the manual plan sees a new commit at newsha456.
+	result.HeadSHAs = []string{"abc123", "newsha456"}
+	h := newE2EHandler(t, svc, client)
+
+	req := buildWebhookRequest(t, webhookPayloadOpts{
+		comment: "schemabot apply -e staging",
+		isPR:    true,
+	}, nil)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	// Drain comments looking for the rejection. The handler must not post a
+	// plan comment (with or without the confirmation footer).
+	deadline := time.After(30 * time.Second)
+	var rejection string
+	for rejection == "" {
+		select {
+		case body := <-result.comments:
+			assert.NotContains(t, body, "Schema Change Plan", "manual apply must not post a stale plan comment")
+			assert.NotContains(t, body, "Applying automatically", "manual apply must never auto-confirm")
+			if strings.Contains(body, "Rejected") && strings.Contains(body, "new commits since discovery") {
+				rejection = body
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for rejection comment")
+		}
+	}
+
+	assert.Contains(t, rejection, "abc123", "rejection must show discovery SHA")
+	assert.Contains(t, rejection, "newsha456", "rejection must show current SHA")
+	assert.Contains(t, rejection, "schemabot apply -e staging", "retry hint must reference the env")
+
+	// Lock acquired earlier in handleApplyCommand must be released so the
+	// user can re-run cleanly. Release runs after postComment; poll briefly.
+	require.Eventually(t, func() bool {
+		lock, err := svc.Storage().Locks().Get(t.Context(), dbName, "mysql")
+		return err == nil && lock == nil
+	}, 5*time.Second, 50*time.Millisecond, "lock must be released after stale-schema rejection")
+}
+
 // TestE2EApplyConfirmStaleSchemaPreservesOtherPRLock verifies that when
 // `apply-confirm` runs on PR #1 and the schema-freshness check rejects, the
 // per-target lock held by a different PR (#999) is NOT released. Using
