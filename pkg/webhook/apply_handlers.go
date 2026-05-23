@@ -132,9 +132,15 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 			}
 		}
 
-		// Stale lock from this PR (no active applies) — release it so we can re-plan
-		if err := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); err != nil {
-			h.logger.Error("failed to release stale lock", "error", err)
+		// Stale lock from this PR (no active applies) — release it so we can re-plan.
+		// Use owner-scoped Release: ownership can change between the Get above
+		// and this Release (e.g. an unrelated `schemabot unlock` clears the lock
+		// and another PR acquires it). ErrLockNotFound / ErrLockNotOwned are
+		// expected and silently no-op'd — the loop below will reacquire if free.
+		relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
+		if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
+			h.logger.Error("failed to release stale lock",
+				"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
 		}
 	}
 
@@ -224,14 +230,16 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 				CommandName: action.Apply,
 				ErrorDetail: "Failed to verify PR HEAD before auto-confirm: " + prErr.Error(),
 			}))
-			if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+			relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
+			if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
 				h.logger.Error("failed to release lock after PR fetch failure",
 					"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
 			}
 			return
 		}
 		if rejected := h.assertSchemaStillCurrent(ctx, repo, pr, installationID, schemaResult, prInfo.HeadSHA, environment, requestedBy, action.Apply); rejected {
-			if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+			relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
+			if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
 				h.logger.Error("failed to release lock after stale-schema rejection",
 					"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
 			}
@@ -246,8 +254,17 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		// new required check was added) would otherwise sneak past. Release
 		// the lock on block so the user can re-run `schemabot apply -e <env>`
 		// once the checks recover, without a manual unlock.
+		//
+		// Use owner-scoped Release rather than ForceRelease: although this
+		// handler invocation acquired the lock earlier, ownership can change
+		// between acquisition and this point (e.g. `schemabot unlock` clears
+		// the lock and another PR acquires it). Release deletes only when
+		// owner matches; ErrLockNotFound / ErrLockNotOwned are expected here
+		// (lock may be absent or now held by another PR) and are not logged
+		// as errors.
 		if blocked := h.enforcePassingChecks(ctx, client, repo, pr, installationID, prInfo.HeadSHA, environment); blocked {
-			if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+			relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
+			if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
 				h.logger.Error("failed to release lock after fresh-HEAD checks gate block",
 					"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
 			}
@@ -296,8 +313,9 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 	// the plan the user reviewed was rendered for the old commit. Catching
 	// it here is the symmetric guard to the auto-confirm branch above.
 	// Use FetchPullRequestNoCache; the cached fetch returns the discovery
-	// SHA. The lock was acquired by this handler invocation, so ForceRelease
-	// is safe.
+	// SHA. Release the lock with owner-scoped Release so a concurrent
+	// `schemabot unlock` + re-acquire by another PR doesn't get its lock
+	// clobbered here; ErrLockNotFound / ErrLockNotOwned are expected.
 	prInfo, prErr := client.FetchPullRequestNoCache(ctx, repo, pr)
 	if prErr != nil {
 		h.logger.Error("failed to fetch PR for stale-schema check, releasing lock",
@@ -308,14 +326,16 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 			CommandName: action.Apply,
 			ErrorDetail: "Failed to verify PR HEAD before posting plan: " + prErr.Error(),
 		}))
-		if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+		relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
+		if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
 			h.logger.Error("failed to release lock after PR fetch failure",
 				"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
 		}
 		return
 	}
 	if rejected := h.assertSchemaStillCurrent(ctx, repo, pr, installationID, schemaResult, prInfo.HeadSHA, environment, requestedBy, action.Apply); rejected {
-		if relErr := h.service.Storage().Locks().ForceRelease(ctx, database, dbType); relErr != nil {
+		relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
+		if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
 			h.logger.Error("failed to release lock after stale-schema rejection",
 				"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
 		}
@@ -480,9 +500,16 @@ func (h *Handler) executeApply(
 		return
 	}
 
-	// No changes — release lock and notify
+	// No changes — release lock and notify. Use owner-scoped Release so we
+	// can't clobber a lock that has changed ownership since this handler
+	// acquired it; ErrLockNotFound / ErrLockNotOwned are expected.
 	if len(planResp.FlatTables()) == 0 {
-		_ = h.service.Storage().Locks().ForceRelease(ctx, database, dbType)
+		lockOwner := fmt.Sprintf("%s#%d", repo, pr)
+		relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
+		if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
+			h.logger.Error("failed to release lock after no-changes confirm",
+				"repo", repo, "pr", pr, "database", database, "database_type", dbType, "error", relErr)
+		}
 		h.postComment(repo, pr, installationID, templates.RenderApplyConfirmNoChanges(database, environment))
 		return
 	}
