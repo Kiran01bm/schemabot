@@ -286,7 +286,9 @@ type PlanRequest struct {
 	// where HEAD advances between the plan being posted and the user clicking
 	// apply-confirm. Empty for non-webhook callers (e.g. CLI plan invocations
 	// without a PR context).
-	HeadSha       string `protobuf:"bytes,9,opt,name=head_sha,json=headSha,proto3" json:"head_sha,omitempty"`
+	HeadSha string `protobuf:"bytes,9,opt,name=head_sha,json=headSha,proto3" json:"head_sha,omitempty"`
+	// Repo-relative schema directory discovered by SchemaBot from the PR.
+	SchemaPath    string `protobuf:"bytes,10,opt,name=schema_path,json=schemaPath,proto3" json:"schema_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -373,6 +375,13 @@ func (x *PlanRequest) GetTarget() string {
 func (x *PlanRequest) GetHeadSha() string {
 	if x != nil {
 		return x.HeadSha
+	}
+	return ""
+}
+
+func (x *PlanRequest) GetSchemaPath() string {
+	if x != nil {
+		return x.SchemaPath
 	}
 	return ""
 }
@@ -2214,7 +2223,7 @@ const file_tern_proto_rawDesc = "" +
 	"\n" +
 	"FilesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfb\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9c\x03\n" +
 	"\vPlanRequest\x12\x1a\n" +
 	"\bdatabase\x18\x01 \x01(\tR\bdatabase\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12H\n" +
@@ -2225,7 +2234,9 @@ const file_tern_proto_rawDesc = "" +
 	"\fpull_request\x18\x05 \x01(\x05R\vpullRequest\x12 \n" +
 	"\venvironment\x18\x06 \x01(\tR\venvironment\x12\x16\n" +
 	"\x06target\x18\b \x01(\tR\x06target\x12\x19\n" +
-	"\bhead_sha\x18\t \x01(\tR\aheadSha\x1aT\n" +
+	"\bhead_sha\x18\t \x01(\tR\aheadSha\x12\x1f\n" +
+	"\vschema_path\x18\n \x01(\tR\n" +
+	"schemaPath\x1aT\n" +
 	"\x10SchemaFilesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12*\n" +
 	"\x05value\x18\x02 \x01(\v2\x14.tern.v1.SchemaFilesR\x05value:\x028\x01J\x04\b\a\x10\b\"\xd4\x01\n" +

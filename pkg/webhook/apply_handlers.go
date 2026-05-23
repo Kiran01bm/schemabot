@@ -141,13 +141,15 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 	// Generate plan
 	prNumber := int32(pr)
 	planReq := api.PlanRequest{
-		Database:    schemaResult.Database,
-		Environment: environment,
-		Type:        schemaResult.Type,
-		SchemaFiles: schemaResult.SchemaFiles,
-		Repository:  repo,
-		PullRequest: &prNumber,
-		HeadSHA:     &schemaResult.HeadSHA,
+		Database:      schemaResult.Database,
+		Environment:   environment,
+		Type:          schemaResult.Type,
+		SchemaFiles:   schemaResult.SchemaFiles,
+		Repository:    repo,
+		PullRequest:   &prNumber,
+		HeadSHA:       &schemaResult.HeadSHA,
+		SchemaPath:    schemaResult.SchemaPath,
+		SourceTrusted: true,
 	}
 
 	planResp, err := h.service.ExecutePlan(ctx, planReq)
@@ -480,13 +482,15 @@ func (h *Handler) executeApply(
 	// Re-plan for drift detection
 	prNumber := int32(pr)
 	planReq := api.PlanRequest{
-		Database:    schemaResult.Database,
-		Environment: environment,
-		Type:        schemaResult.Type,
-		SchemaFiles: schemaResult.SchemaFiles,
-		Repository:  repo,
-		PullRequest: &prNumber,
-		HeadSHA:     &schemaResult.HeadSHA,
+		Database:      schemaResult.Database,
+		Environment:   environment,
+		Type:          schemaResult.Type,
+		SchemaFiles:   schemaResult.SchemaFiles,
+		Repository:    repo,
+		PullRequest:   &prNumber,
+		HeadSHA:       &schemaResult.HeadSHA,
+		SchemaPath:    schemaResult.SchemaPath,
+		SourceTrusted: true,
 	}
 
 	planResp, err := h.service.ExecutePlan(ctx, planReq)
@@ -542,10 +546,8 @@ func (h *Handler) executeApply(
 
 	caller := fmt.Sprintf("github:%s@%s#%d", requestedBy, repo, pr)
 
-	// Set observer before starting the apply — consumed by Apply() before the
-	// engine starts, so the observer is registered before any progress events fire.
-	// ApplyID is set to 0 here; LocalClient.Apply() updates it after creating
-	// the apply record.
+	// Set observer before queuing the apply so ExecuteApply can register it on
+	// the durable apply row before scheduler dispatch starts.
 	observer := NewCommentObserver(CommentObserverConfig{
 		GHClient:       h.ghClient,
 		Storage:        h.service.Storage(),

@@ -258,6 +258,8 @@ message PlanRequest {
   // apply-confirm. Empty for non-webhook callers (e.g. CLI plan invocations
   // without a PR context).
   string head_sha = 9;
+  // Repo-relative schema directory discovered by SchemaBot from the PR.
+  string schema_path = 10;
 }
 
 // TableChange represents a DDL change to a table.
@@ -508,4 +510,3 @@ message VolumeResponse {
   // New volume level.
   int32 new_volume = 4;
 }
-
