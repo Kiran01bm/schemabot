@@ -1587,13 +1587,18 @@ func TestE2EApplyConfirmRejectsWhenPlanSHAStale(t *testing.T) {
 	// created when the original `apply` posted the confirmation comment.
 	seedCheck(t, svc, dbName, "staging", "action_required")
 
-	// Seed the lock owned by this PR (from the prior `apply`).
+	// Seed the lock owned by this PR (from the prior `apply`). PendingPlanID
+	// matches the stale plan_identifier seeded just below — apply-confirm
+	// loads the confirmation plan via this field, not by "newest plan for
+	// target", so plain `schemabot plan` rows cannot defeat the check.
+	const stalePlanID = "plan_stale_abc123"
 	require.NoError(t, svc.Storage().Locks().Acquire(t.Context(), &storage.Lock{
-		DatabaseName: dbName,
-		DatabaseType: "mysql",
-		Repository:   "octocat/hello-world",
-		PullRequest:  1,
-		Owner:        "octocat/hello-world#1",
+		DatabaseName:  dbName,
+		DatabaseType:  "mysql",
+		Repository:    "octocat/hello-world",
+		PullRequest:   1,
+		Owner:         "octocat/hello-world#1",
+		PendingPlanID: stalePlanID,
 	}))
 	t.Cleanup(func() {
 		_ = svc.Storage().Locks().ForceRelease(context.WithoutCancel(t.Context()), dbName, "mysql")
@@ -1603,7 +1608,7 @@ func TestE2EApplyConfirmRejectsWhenPlanSHAStale(t *testing.T) {
 	// plan the user reviewed; the cross-delivery guard must reject when the
 	// fresh HEAD no longer matches.
 	planID, err := svc.Storage().Plans().Create(t.Context(), &storage.Plan{
-		PlanIdentifier: "plan_stale_abc123",
+		PlanIdentifier: stalePlanID,
 		Database:       dbName,
 		DatabaseType:   "mysql",
 		Deployment:     dbName,
@@ -1763,6 +1768,121 @@ func TestE2EApplyConfirmStalePlanPreservesOtherPRLock(t *testing.T) {
 		lock, err := svc.Storage().Locks().Get(t.Context(), dbName, "mysql")
 		return err != nil || lock == nil || lock.Owner != otherOwner
 	}, 1*time.Second, 50*time.Millisecond, "other PR's lock must remain intact after stale-plan handling on PR #1")
+}
+
+// TestE2EApplyConfirmRejectsWhenPlainPlanSupersedesApplyPlan covers the
+// cross-delivery race that the per-target "newest plan" lookup cannot see:
+//
+//  1. `schemabot apply -e staging` posts a confirmation plan at PR HEAD abc123
+//     and acquires the lock with PendingPlanID pointing at that plan.
+//  2. A new commit pushes the PR HEAD to newsha456.
+//  3. A plain `schemabot plan -e staging` runs at newsha456; its plan row
+//     lands in the same `plans` table.
+//  4. A reviewer scrolls back to the abc123 confirmation comment and clicks
+//     apply-confirm.
+//
+// The lock-pinned plan_identifier ensures apply-confirm loads the plan the
+// human actually reviewed (abc123). A "latest plan for repo+pr+env+database"
+// lookup would pick up the newer plain plan at newsha456 and let the stale
+// confirmation comment proceed — exactly the gap reported by Codex on #143.
+func TestE2EApplyConfirmRejectsWhenPlainPlanSupersedesApplyPlan(t *testing.T) {
+	dbName := "webhook_confirm_plain_supersedes_apply"
+	svc := setupE2EService(t, dbName)
+
+	seedCheck(t, svc, dbName, "staging", "action_required")
+
+	const applyPlanID = "plan_apply_abc123"
+	const plainPlanID = "plan_plain_newsha456"
+
+	// Lock acquired by `schemabot apply`, pinned to the confirmation plan.
+	require.NoError(t, svc.Storage().Locks().Acquire(t.Context(), &storage.Lock{
+		DatabaseName:  dbName,
+		DatabaseType:  "mysql",
+		Repository:    "octocat/hello-world",
+		PullRequest:   1,
+		Owner:         "octocat/hello-world#1",
+		PendingPlanID: applyPlanID,
+	}))
+	t.Cleanup(func() {
+		_ = svc.Storage().Locks().ForceRelease(context.WithoutCancel(t.Context()), dbName, "mysql")
+	})
+
+	// Confirmation plan the user actually reviewed (older commit).
+	_, err := svc.Storage().Plans().Create(t.Context(), &storage.Plan{
+		PlanIdentifier: applyPlanID,
+		Database:       dbName,
+		DatabaseType:   "mysql",
+		Deployment:     dbName,
+		Target:         dbName,
+		Repository:     "octocat/hello-world",
+		PullRequest:    1,
+		Environment:    "staging",
+		HeadSHA:        "abc123",
+		CreatedAt:      time.Now().Add(-time.Minute),
+	})
+	require.NoError(t, err)
+
+	// Plain `schemabot plan` written AFTER the new commit. With a "latest plan
+	// for target" lookup, this would defeat the cross-delivery guard. With
+	// the lock-pinned PendingPlanID, this row is ignored at confirm time.
+	_, err = svc.Storage().Plans().Create(t.Context(), &storage.Plan{
+		PlanIdentifier: plainPlanID,
+		Database:       dbName,
+		DatabaseType:   "mysql",
+		Deployment:     dbName,
+		Target:         dbName,
+		Repository:     "octocat/hello-world",
+		PullRequest:    1,
+		Environment:    "staging",
+		HeadSHA:        "newsha456",
+		CreatedAt:      time.Now(),
+	})
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	client := gh.NewClient(nil)
+	client.BaseURL, _ = url.Parse(server.URL + "/")
+
+	schemabotConfig := fmt.Sprintf("database: %s\ntype: mysql\n", dbName)
+	schemaFiles := map[string]string{
+		"users.sql": "CREATE TABLE `users` (\n  `id` bigint unsigned NOT NULL AUTO_INCREMENT,\n  `name` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+	}
+
+	result := setupFakeGitHubForPlan(t, mux, schemaFiles, schemabotConfig, dbName)
+	// Current HEAD seen by every PR fetch in this delivery — matches the
+	// later plain plan, not the confirmation plan.
+	result.HeadSHAs = []string{"newsha456"}
+	h := newE2EHandler(t, svc, client)
+
+	confirmReq := buildWebhookRequest(t, webhookPayloadOpts{
+		comment: "schemabot apply-confirm -e staging",
+		isPR:    true,
+	}, nil)
+	confirmRR := httptest.NewRecorder()
+	h.ServeHTTP(confirmRR, confirmReq)
+	require.Equal(t, http.StatusOK, confirmRR.Code)
+
+	select {
+	case body := <-result.comments:
+		assert.Contains(t, body, "Rejected", "must reject the stale confirmation")
+		assert.Contains(t, body, "the plan you confirmed is stale")
+		assert.Contains(t, body, "abc123", "must name the plan SHA the user reviewed")
+		assert.Contains(t, body, "newsha456", "must name the current HEAD")
+		assert.NotContains(t, body, "Schema Change In Progress", "apply must not start")
+		assert.NotContains(t, body, "Schema Change Applied", "apply must not complete")
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for apply-confirm rejection")
+	}
+
+	applies, err := svc.Storage().Applies().GetByPR(t.Context(), "octocat/hello-world", 1)
+	require.NoError(t, err)
+	for _, a := range applies {
+		assert.NotEqual(t, dbName, a.Database,
+			"a stale confirmation plan must never start an apply, even when a newer plain plan exists")
+	}
 }
 
 // TestE2EApplyThreeEnvEnforcement verifies that checkPriorEnvironments checks ALL

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -133,8 +134,8 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	// Cleanup in reverse order
-	for i := len(cleanupFuncs) - 1; i >= 0; i-- {
-		cleanupFuncs[i]()
+	for _, v := range slices.Backward(cleanupFuncs) {
+		v()
 	}
 
 	os.Exit(code)

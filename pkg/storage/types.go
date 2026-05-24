@@ -34,6 +34,17 @@ type Lock struct {
 	// For CLI: "cli:user@hostname" or similar
 	Owner string
 
+	// PendingPlanID is the plan_identifier of the apply-confirmation plan that
+	// posted this lock. apply-confirm loads this exact plan to evaluate the
+	// cross-delivery freshness invariant, instead of guessing from "newest plan
+	// for repo+pr+env+database" (which can pick up plain `schemabot plan`
+	// results posted after the confirmation plan).
+	//
+	// Empty when the lock was acquired outside the apply path (rollback, CLI
+	// unlock/lock, or a row written before this column existed). The confirm
+	// path treats empty as "skip the freshness check" rather than fail closed.
+	PendingPlanID string
+
 	// CreatedAt is when the lock was acquired.
 	CreatedAt time.Time
 

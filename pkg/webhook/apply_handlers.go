@@ -179,13 +179,16 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		return
 	}
 
-	// Acquire lock
+	// Acquire lock. PendingPlanID pins the confirmation plan this lock was
+	// posted with so apply-confirm can load the exact plan the human reviewed
+	// (not whatever happens to be newest in the plans table at confirm time).
 	lock := &storage.Lock{
-		DatabaseName: database,
-		DatabaseType: dbType,
-		Owner:        lockOwner,
-		Repository:   repo,
-		PullRequest:  pr,
+		DatabaseName:  database,
+		DatabaseType:  dbType,
+		Owner:         lockOwner,
+		Repository:    repo,
+		PullRequest:   pr,
+		PendingPlanID: planResp.PlanID,
 	}
 	if err := h.service.Storage().Locks().Acquire(ctx, lock); err != nil {
 		h.logger.Error("failed to acquire lock", "error", err)
@@ -426,13 +429,19 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 		return
 	}
 
-	// Cross-delivery freshness check: reject if the stored plan (the one the
-	// user reviewed) was rendered against a commit that is no longer the PR
-	// HEAD. This closes the window that assertSchemaStillCurrent cannot see —
-	// HEAD advancing between the plan being posted and the user clicking
+	// Cross-delivery freshness check: reject if the confirmation plan (the one
+	// the user reviewed) was rendered against a commit that is no longer the
+	// PR HEAD. This closes the window that assertSchemaStillCurrent cannot
+	// see — HEAD advancing between the plan being posted and the user clicking
 	// apply-confirm. We compare against the *stored plan's* SHA, not the
 	// confirm-time discovery SHA, because at this point both ends of a
 	// confirm-time-discovery-vs-fresh-HEAD comparison would see the new SHA.
+	//
+	// We load the plan by lock.PendingPlanID — the plan_identifier this lock
+	// was acquired with — instead of "newest plan for repo+pr+env+database".
+	// The newest-plan lookup is unsafe because plain `schemabot plan` results
+	// land in the same plans table and can supersede the confirmation plan a
+	// reviewer is about to confirm.
 	//
 	// Use owner-scoped Release rather than ForceRelease even though the
 	// ownership check above just succeeded: ownership can change between that
@@ -440,15 +449,16 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 	// ForceRelease would clear the new owner's lock. Release deletes only when
 	// owner still matches; ErrLockNotFound / ErrLockNotOwned are expected if
 	// ownership has already changed and are not logged as errors.
-	storedPlan, planLoadErr := h.latestPlanForTarget(ctx, repo, pr, environment, database, dbType)
+	storedPlan, planLoadErr := h.confirmationPlanForLock(ctx, existingLock)
 	if planLoadErr != nil {
-		h.logger.Error("failed to load stored plan for cross-delivery freshness check",
-			"repo", repo, "pr", pr, "database", database, "database_type", dbType, "environment", environment, "error", planLoadErr)
+		h.logger.Error("failed to load confirmation plan for cross-delivery freshness check",
+			"repo", repo, "pr", pr, "database", database, "database_type", dbType, "environment", environment,
+			"pending_plan_id", existingLock.PendingPlanID, "error", planLoadErr)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
 			Environment: environment,
 			CommandName: action.ApplyConfirm,
-			ErrorDetail: "Failed to load stored plan: " + planLoadErr.Error(),
+			ErrorDetail: "Failed to load confirmation plan: " + planLoadErr.Error(),
 		}))
 		return
 	}

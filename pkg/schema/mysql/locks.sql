@@ -5,6 +5,7 @@ CREATE TABLE `locks` (
   `repository` varchar(255) NOT NULL,
   `pull_request` int unsigned NOT NULL,
   `owner` varchar(255) NOT NULL,
+  `pending_plan_id` varchar(255) NOT NULL DEFAULT '',
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),

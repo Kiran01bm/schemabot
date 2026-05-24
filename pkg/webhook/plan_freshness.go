@@ -104,27 +104,19 @@ func (h *Handler) assertPlanStillCurrent(
 	return true
 }
 
-// latestPlanForTarget returns the most recently created stored plan for the
-// given PR + environment + database + type, or nil if none exists.
+// confirmationPlanForLock loads the plan that the active lock was acquired
+// with — the apply-confirmation plan the human reviewed before clicking
+// apply-confirm. Returns nil when the lock predates this column (empty
+// PendingPlanID) or when the referenced plan row is gone; assertPlanStillCurrent
+// then skips the freshness check rather than failing closed.
 //
-// PlanStore.GetByPR returns all plans for a repo+pr ordered by created_at DESC;
-// the first row matching the target filters is the plan the user is about to
-// confirm. Used by handleApplyConfirmCommand to load the plan for the
-// cross-delivery freshness check.
-func (h *Handler) latestPlanForTarget(
-	ctx context.Context,
-	repo string,
-	pr int,
-	environment, database, databaseType string,
-) (*storage.Plan, error) {
-	plans, err := h.service.Storage().Plans().GetByPR(ctx, repo, pr)
-	if err != nil {
-		return nil, err
+// Looking up the plan via lock.PendingPlanID (instead of "newest plan for
+// repo+pr+env+database") avoids picking up a later plain `schemabot plan`
+// that landed in the same plans table after the confirmation plan was posted,
+// which would make a stale confirmation comment look current.
+func (h *Handler) confirmationPlanForLock(ctx context.Context, lock *storage.Lock) (*storage.Plan, error) {
+	if lock == nil || lock.PendingPlanID == "" {
+		return nil, nil
 	}
-	for _, p := range plans {
-		if p.Environment == environment && p.Database == database && p.DatabaseType == databaseType {
-			return p, nil
-		}
-	}
-	return nil, nil
+	return h.service.Storage().Plans().Get(ctx, lock.PendingPlanID)
 }

@@ -16,7 +16,7 @@ import (
 
 // lockColumns lists all columns for SELECT queries.
 const lockColumns = `id, database_name, database_type, repository, pull_request, owner,
-	created_at, updated_at`
+	pending_plan_id, created_at, updated_at`
 
 // lockStore implements storage.LockStore using MySQL.
 type lockStore struct {
@@ -24,7 +24,10 @@ type lockStore struct {
 }
 
 // Acquire attempts to acquire a lock. Returns ErrLockHeld if already held by another owner.
-// If the same owner already holds the lock, this is a no-op (idempotent).
+// If the same owner already holds the lock, this is a no-op except that a non-empty
+// lock.PendingPlanID will overwrite the stored one — the latest apply attempt's
+// confirmation plan must be the one apply-confirm loads. A re-acquire that passes an
+// empty PendingPlanID (rollback, CLI) leaves the existing value intact.
 func (s *lockStore) Acquire(ctx context.Context, lock *storage.Lock) error {
 	// Check if lock already exists
 	existing, err := s.Get(ctx, lock.DatabaseName, lock.DatabaseType)
@@ -33,18 +36,29 @@ func (s *lockStore) Acquire(ctx context.Context, lock *storage.Lock) error {
 	}
 
 	if existing != nil {
-		// Lock exists - check if same owner (idempotent)
-		if existing.Owner == lock.Owner {
-			return nil // Same owner, no-op
+		if existing.Owner != lock.Owner {
+			return storage.ErrLockHeld
 		}
-		return storage.ErrLockHeld
+		// Same owner — refresh the confirmation plan reference if the caller
+		// supplied a new one (apply re-run posts a new confirmation plan).
+		if lock.PendingPlanID != "" && lock.PendingPlanID != existing.PendingPlanID {
+			if _, err := s.db.ExecContext(ctx, `
+				UPDATE locks
+				SET pending_plan_id = ?, updated_at = NOW()
+				WHERE database_name = ? AND database_type = ? AND owner = ?
+			`, lock.PendingPlanID, lock.DatabaseName, lock.DatabaseType, lock.Owner); err != nil {
+				return fmt.Errorf("refresh pending_plan_id for %s/%s owner=%s: %w",
+					lock.DatabaseName, lock.DatabaseType, lock.Owner, err)
+			}
+		}
+		return nil
 	}
 
 	// Try to insert - will fail if lock exists due to UNIQUE constraint (race condition)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO locks (database_name, database_type, repository, pull_request, owner)
-		VALUES (?, ?, ?, ?, ?)
-	`, lock.DatabaseName, lock.DatabaseType, lock.Repository, lock.PullRequest, lock.Owner)
+		INSERT INTO locks (database_name, database_type, repository, pull_request, owner, pending_plan_id)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, lock.DatabaseName, lock.DatabaseType, lock.Repository, lock.PullRequest, lock.Owner, lock.PendingPlanID)
 
 	if err != nil {
 		// Check if it's a duplicate key error (lock already held - race condition)
@@ -179,7 +193,7 @@ func scanLockInto(s scanner) (*storage.Lock, error) {
 	err := s.Scan(
 		&lock.ID, &lock.DatabaseName, &lock.DatabaseType,
 		&lock.Repository, &lock.PullRequest, &lock.Owner,
-		&lock.CreatedAt, &lock.UpdatedAt,
+		&lock.PendingPlanID, &lock.CreatedAt, &lock.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
