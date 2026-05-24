@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/block/schemabot/pkg/api"
+	ghclient "github.com/block/schemabot/pkg/github"
 	"github.com/block/schemabot/pkg/state"
 	"github.com/block/schemabot/pkg/storage"
 	"github.com/block/schemabot/pkg/webhook/action"
@@ -163,6 +164,8 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment, databaseName string, installationID int64, requestedBy string, result CommandResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	// Dedupe FetchPullRequest calls within this command invocation.
+	ctx = ghclient.WithPRInfoCache(ctx)
 
 	client, err := h.ghClient.ForInstallation(installationID)
 	if err != nil {

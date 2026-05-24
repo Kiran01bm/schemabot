@@ -872,6 +872,8 @@ func filterInProgressNonSchemaBotChecks(statuses []ghclient.PRCheckStatus) []tem
 func (h *Handler) handleUnlockCommand(repo string, pr int, installationID int64, requestedBy string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// Dedupe FetchPullRequest calls within this command invocation.
+	ctx = ghclient.WithPRInfoCache(ctx)
 
 	// Find locks held by this PR
 	locks, err := h.service.Storage().Locks().GetByPR(ctx, repo, pr)
