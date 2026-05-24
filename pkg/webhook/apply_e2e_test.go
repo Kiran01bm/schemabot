@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1883,6 +1884,212 @@ func TestE2EApplyConfirmRejectsWhenPlainPlanSupersedesApplyPlan(t *testing.T) {
 		assert.NotEqual(t, dbName, a.Database,
 			"a stale confirmation plan must never start an apply, even when a newer plain plan exists")
 	}
+}
+
+// TestE2EApplyAutoConfirmReGatesAgainstFreshHEADBeforeApply verifies that the
+// `apply -y` auto-confirm branch re-evaluates the PR checks gate against the
+// fresh HEAD immediately before executeApply, even when the HEAD has not
+// moved (so the schema-freshness check passes). This catches the case where
+// a required check transitioned to failing on the same SHA — e.g. CI re-ran
+// red, or a new required check was added — between the discovery-time early
+// gate and the apply itself.
+func TestE2EApplyAutoConfirmReGatesAgainstFreshHEADBeforeApply(t *testing.T) {
+	dbName := "webhook_auto_confirm_regate"
+	svc := setupE2EService(t, dbName)
+
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	client := gh.NewClient(nil)
+	client.BaseURL, _ = url.Parse(server.URL + "/")
+
+	schemabotConfig := fmt.Sprintf("database: %s\ntype: mysql\n", dbName)
+	schemaFiles := map[string]string{
+		"users.sql": "CREATE TABLE `users` (\n  `id` bigint unsigned NOT NULL AUTO_INCREMENT,\n  `name` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+	}
+
+	result := setupFakeGitHubForPlan(t, mux, schemaFiles, schemabotConfig, dbName)
+	// HEAD does not advance — both /pulls/1 calls return abc123 (default).
+	// The schema-freshness check therefore passes; the re-gate is the only
+	// thing that can still block the apply.
+
+	// GraphQL handler: PASS on the early gate call, FAIL on the fresh-HEAD
+	// re-gate call. Without the re-gate, this transition would be invisible
+	// to `apply -y` and the apply would proceed against red CI.
+	var graphqlCalls atomic.Int64
+	passing := rollupGraphQLHandler(nil)
+	failing := rollupGraphQLHandler([]rollupNode{
+		{
+			Typename:   "CheckRun",
+			Name:       "ci/lint",
+			Status:     "COMPLETED",
+			Conclusion: "FAILURE",
+			AppSlug:    "ci-bot",
+		},
+	})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if graphqlCalls.Add(1) == 1 {
+			passing(w, r)
+			return
+		}
+		failing(w, r)
+	})
+	result.GraphQLHandler.Store(&handler)
+
+	h := newE2EHandler(t, svc, client)
+
+	req := buildWebhookRequest(t, webhookPayloadOpts{
+		comment: "schemabot apply -e staging -y",
+		isPR:    true,
+	}, nil)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	// Expect a "Apply Blocked … checks failing" comment from the re-gate.
+	// Drain comments looking for the blocking message; fail if anything
+	// indicates the apply started.
+	deadline := time.After(30 * time.Second)
+	var blocked string
+	for blocked == "" {
+		select {
+		case body := <-result.comments:
+			assert.NotContains(t, body, "Schema Change In Progress", "apply must not have started")
+			assert.NotContains(t, body, "Schema Change Applied", "apply must not have completed")
+			if strings.Contains(body, "Apply Blocked") && strings.Contains(body, "ci/lint") {
+				blocked = body
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for fresh-HEAD checks-gate block comment")
+		}
+	}
+
+	assert.Contains(t, blocked, "failure", "block comment must show the failing conclusion")
+	assert.Contains(t, blocked, "staging", "retry hint must reference the env")
+
+	// Re-gate must have actually happened — at least two GraphQL calls
+	// (early gate + re-gate). The singleflight does not memoise across
+	// sequential calls so the second call hits the mock.
+	assert.GreaterOrEqual(t, graphqlCalls.Load(), int64(2),
+		"expected at least 2 GraphQL calls (early gate + fresh-HEAD re-gate)")
+
+	// Lock must be released so the user can re-run `apply -y` once checks recover.
+	require.Eventually(t, func() bool {
+		lock, err := svc.Storage().Locks().Get(t.Context(), dbName, "mysql")
+		return err == nil && lock == nil
+	}, 5*time.Second, 50*time.Millisecond, "lock must be released after fresh-HEAD checks-gate block")
+
+	// No apply record — executeApply must not have been reached.
+	applies, err := svc.Storage().Applies().GetByPR(t.Context(), "octocat/hello-world", 1)
+	require.NoError(t, err)
+	for _, a := range applies {
+		assert.NotEqual(t, dbName, a.Database, "no apply for %s should have been started", dbName)
+	}
+}
+
+// TestE2EApplyAutoConfirmFreshHEADBlockPreservesOtherPRLock verifies that when
+// the fresh-HEAD checks gate blocks `apply -y` and the per-target lock has
+// changed owner to a different PR between acquisition and the block, the
+// owner-scoped Release leaves the other PR's lock intact. ForceRelease here
+// would inadvertently clear that lock and remove the concurrency safety gate.
+func TestE2EApplyAutoConfirmFreshHEADBlockPreservesOtherPRLock(t *testing.T) {
+	dbName := "webhook_auto_confirm_regate_otherlock"
+	svc := setupE2EService(t, dbName)
+
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	client := gh.NewClient(nil)
+	client.BaseURL, _ = url.Parse(server.URL + "/")
+
+	schemabotConfig := fmt.Sprintf("database: %s\ntype: mysql\n", dbName)
+	schemaFiles := map[string]string{
+		"users.sql": "CREATE TABLE `users` (\n  `id` bigint unsigned NOT NULL AUTO_INCREMENT,\n  `name` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+	}
+
+	result := setupFakeGitHubForPlan(t, mux, schemaFiles, schemabotConfig, dbName)
+	// HEAD does not advance — schema-freshness check passes; the re-gate is
+	// the only thing that can still block.
+
+	otherOwner := "octocat/hello-world#999"
+	t.Cleanup(func() {
+		_ = svc.Storage().Locks().ForceRelease(context.WithoutCancel(t.Context()), dbName, "mysql")
+	})
+
+	// GraphQL handler: PASS on the early gate call; on the re-gate call,
+	// FIRST swap the lock owner to a different PR (#999), THEN return FAILURE.
+	// The swap simulates an unrelated `schemabot unlock` + another PR
+	// acquiring the lock in the window between our acquire and our re-gate.
+	var graphqlCalls atomic.Int64
+	passing := rollupGraphQLHandler(nil)
+	failing := rollupGraphQLHandler([]rollupNode{
+		{
+			Typename:   "CheckRun",
+			Name:       "ci/lint",
+			Status:     "COMPLETED",
+			Conclusion: "FAILURE",
+			AppSlug:    "ci-bot",
+		},
+	})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if graphqlCalls.Add(1) == 1 {
+			passing(w, r)
+			return
+		}
+		// Re-gate call: swap the lock to PR #999 before responding FAILURE.
+		// ForceRelease then re-Acquire is the closest analogue to "another
+		// caller cleared and reacquired" within a single test process.
+		_ = svc.Storage().Locks().ForceRelease(r.Context(), dbName, "mysql")
+		_ = svc.Storage().Locks().Acquire(r.Context(), &storage.Lock{
+			DatabaseName: dbName,
+			DatabaseType: "mysql",
+			Repository:   "octocat/hello-world",
+			PullRequest:  999,
+			Owner:        otherOwner,
+		})
+		failing(w, r)
+	})
+	result.GraphQLHandler.Store(&handler)
+
+	h := newE2EHandler(t, svc, client)
+
+	req := buildWebhookRequest(t, webhookPayloadOpts{
+		comment: "schemabot apply -e staging -y",
+		isPR:    true,
+	}, nil)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	// Drain comments until the blocking message lands; fail if the apply started.
+	deadline := time.After(30 * time.Second)
+	var blocked string
+	for blocked == "" {
+		select {
+		case body := <-result.comments:
+			assert.NotContains(t, body, "Schema Change In Progress", "apply must not have started")
+			assert.NotContains(t, body, "Schema Change Applied", "apply must not have completed")
+			if strings.Contains(body, "Apply Blocked") && strings.Contains(body, "ci/lint") {
+				blocked = body
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for fresh-HEAD checks-gate block comment")
+		}
+	}
+
+	// The other PR's lock must remain intact through the full polling window —
+	// long enough for the gate-block path's owner-scoped Release attempt to
+	// land (and silently no-op as ErrLockNotOwned) before t.Cleanup tears
+	// down. require.Never both asserts the lock is preserved and synchronises
+	// with the async handler so we don't race shutdown.
+	require.Never(t, func() bool {
+		lock, err := svc.Storage().Locks().Get(t.Context(), dbName, "mysql")
+		return err != nil || lock == nil || lock.Owner != otherOwner
+	}, 1*time.Second, 50*time.Millisecond, "other PR's lock must remain intact after fresh-HEAD gate block on PR #1")
 }
 
 // TestE2EApplyThreeEnvEnforcement verifies that checkPriorEnvironments checks ALL
