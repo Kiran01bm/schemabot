@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/schemabot/e2e/testutil"
 	"github.com/block/schemabot/pkg/cmd/client"
 	"github.com/block/schemabot/pkg/e2eutil"
 	"github.com/block/schemabot/pkg/state"
@@ -162,46 +163,49 @@ func startE2ESchemaBotServer(t *testing.T, endpoint string) {
 func waitForSchemaBotHealth(t *testing.T, endpoint string, timeout time.Duration) {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
 	var lastErr error
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/health", nil)
-		require.NoError(t, err)
-		resp, err := http.DefaultClient.Do(req)
-		cancel()
-		if err == nil {
+	testutil.Poll(t, timeout, 500*time.Millisecond,
+		func() bool {
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/health", nil)
+			require.NoError(t, err)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				lastErr = err
+				return false
+			}
 			statusCode := resp.StatusCode
 			require.NoError(t, resp.Body.Close())
 			if statusCode == http.StatusOK {
-				return
+				return true
 			}
 			lastErr = fmt.Errorf("health returned status %d", statusCode)
-		} else {
-			lastErr = err
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "SchemaBot did not become healthy within %s: %v", timeout, lastErr)
+			return false
+		},
+		func() string {
+			return fmt.Sprintf("SchemaBot did not become healthy within %s: %v", timeout, lastErr)
+		},
+	)
 }
 
 func waitForTableInProgress(t *testing.T, binPath, schemaDir, endpoint, applyID, tableName string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
 	var lastOut string
-	for time.Now().Before(deadline) {
-		out, _ := e2eutil.RunCLIWithErrorInDir(t, binPath, schemaDir, "progress",
-			applyID,
-			"--endpoint", endpoint,
-			"--watch=false",
-		)
-		lastOut = out
-		if strings.Contains(e2eutil.StripANSI(out), tableName) {
-			return
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for table %s in progress, last output: %s", tableName, lastOut)
+	testutil.Poll(t, timeout, 300*time.Millisecond,
+		func() bool {
+			out, _ := e2eutil.RunCLIWithErrorInDir(t, binPath, schemaDir, "progress",
+				applyID,
+				"--endpoint", endpoint,
+				"--watch=false",
+			)
+			lastOut = out
+			return strings.Contains(e2eutil.StripANSI(out), tableName)
+		},
+		func() string {
+			return fmt.Sprintf("timeout waiting for table %s in progress, last output: %s", tableName, lastOut)
+		},
+	)
 }
 
 func ensureNoActiveChange(t *testing.T, endpoint string) {
@@ -454,21 +458,22 @@ func writeExistingTablesSchema(t *testing.T, schemaDir string) {
 
 func waitForIndex(t *testing.T, db *sql.DB, tableName, indexName string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		rows, err := db.QueryContext(t.Context(), fmt.Sprintf("SHOW INDEX FROM %s WHERE Key_name = ?", tableName), indexName)
-		if err == nil {
-			if rows.Next() {
-				_ = rows.Close()
-				return
+	testutil.Poll(t, timeout, 500*time.Millisecond,
+		func() bool {
+			rows, err := db.QueryContext(t.Context(), fmt.Sprintf("SHOW INDEX FROM %s WHERE Key_name = ?", tableName), indexName)
+			if err != nil {
+				return false
 			}
+			found := rows.Next()
 			_ = rows.Close()
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	var tblName, createStmt string
-	_ = db.QueryRowContext(t.Context(), fmt.Sprintf("SHOW CREATE TABLE %s", tableName)).Scan(&tblName, &createStmt)
-	require.Failf(t, "timeout", "timeout waiting for index %s on %s, table structure: %s", indexName, tableName, createStmt)
+			return found
+		},
+		func() string {
+			var tblName, createStmt string
+			_ = db.QueryRowContext(t.Context(), fmt.Sprintf("SHOW CREATE TABLE %s", tableName)).Scan(&tblName, &createStmt)
+			return fmt.Sprintf("timeout waiting for index %s on %s, table structure: %s", indexName, tableName, createStmt)
+		},
+	)
 }
 
 func seedTestRows(t *testing.T, db *sql.DB, tableName string, columns string, valueTemplate string, rowCount int) {

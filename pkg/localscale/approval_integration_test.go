@@ -9,6 +9,8 @@ import (
 	ps "github.com/planetscale/planetscale-go/planetscale"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/block/schemabot/e2e/testutil"
 )
 
 // TestApply_RequireApproval_RejectsDeployment verifies that LocalScale rejects
@@ -32,16 +34,15 @@ func TestApply_RequireApproval_RejectsDeployment(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for branch to be ready.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		br, brErr := testClient.GetBranch(ctx, &ps.GetDatabaseBranchRequest{
-			Organization: testOrg, Database: "approvaldb", Branch: branchName,
-		})
-		if brErr == nil && br.Ready {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	testutil.Poll(t, 15*time.Second, 500*time.Millisecond,
+		func() bool {
+			br, brErr := testClient.GetBranch(ctx, &ps.GetDatabaseBranchRequest{
+				Organization: testOrg, Database: "approvaldb", Branch: branchName,
+			})
+			return brErr == nil && br.Ready
+		},
+		func() string { return "branch " + branchName + " did not become ready" },
+	)
 
 	// Apply DDL on branch
 	require.NoError(t, testContainer.SeedDDL(ctx, testOrg, "approvaldb", "testkeyspace",
@@ -58,16 +59,15 @@ func TestApply_RequireApproval_RejectsDeployment(t *testing.T) {
 	require.NotNil(t, dr)
 
 	// Wait for deploy request to be ready (diff computed).
-	deadline = time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		got, getErr := testClient.GetDeployRequest(ctx, &ps.GetDeployRequestRequest{
-			Organization: testOrg, Database: "approvaldb", Number: dr.Number,
-		})
-		if getErr == nil && (got.DeploymentState == "ready" || got.DeploymentState == "no_changes") {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	testutil.Poll(t, 15*time.Second, 500*time.Millisecond,
+		func() bool {
+			got, getErr := testClient.GetDeployRequest(ctx, &ps.GetDeployRequestRequest{
+				Organization: testOrg, Database: "approvaldb", Number: dr.Number,
+			})
+			return getErr == nil && (got.DeploymentState == "ready" || got.DeploymentState == "no_changes")
+		},
+		func() string { return "deploy request did not become ready" },
+	)
 
 	// Try to deploy — should fail with approval error
 	_, err = testClient.DeployDeployRequest(ctx, &ps.PerformDeployRequest{

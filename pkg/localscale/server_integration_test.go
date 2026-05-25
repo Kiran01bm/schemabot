@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/schemabot/e2e/testutil"
 	"github.com/block/schemabot/pkg/localscale"
 	"github.com/block/schemabot/pkg/psclient"
 )
@@ -252,19 +253,18 @@ func TestBranchLifecycle(t *testing.T) {
 	}
 
 	// Wait for branch to become ready
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		got, err := testClient.GetBranch(ctx, &ps.GetDatabaseBranchRequest{
-			Organization: testOrg,
-			Database:     testDB,
-			Branch:       branchName,
-		})
-		require.NoError(t, err, "GetBranch error")
-		if got.Ready {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	testutil.Poll(t, 10*time.Second, 500*time.Millisecond,
+		func() bool {
+			got, err := testClient.GetBranch(ctx, &ps.GetDatabaseBranchRequest{
+				Organization: testOrg,
+				Database:     testDB,
+				Branch:       branchName,
+			})
+			require.NoError(t, err, "GetBranch error")
+			return got.Ready
+		},
+		func() string { return "branch " + branchName + " did not become ready" },
+	)
 
 	// Verify it's ready now
 	got, err := testClient.GetBranch(ctx, &ps.GetDatabaseBranchRequest{
@@ -348,17 +348,17 @@ func verifyColumnExists(t *testing.T, table, column string, keyspace ...string) 
 // Retries for up to 5s to account for vtgate schema cache refresh delay.
 func verifyColumnNotExists(t *testing.T, table, column string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		result, err := testContainer.VtgateExec(t.Context(), testOrg, testDB, "testapp_sharded",
-			fmt.Sprintf("SHOW COLUMNS FROM %s LIKE '%s'", table, column))
-		require.NoError(t, err, "verify column not exists %s.%s", table, column)
-		if len(result.Rows) == 0 {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	assert.Failf(t, "column still exists", "column '%s' still exists in table '%s' after waiting for schema cache refresh", column, table)
+	testutil.Poll(t, 5*time.Second, 500*time.Millisecond,
+		func() bool {
+			result, err := testContainer.VtgateExec(t.Context(), testOrg, testDB, "testapp_sharded",
+				fmt.Sprintf("SHOW COLUMNS FROM %s LIKE '%s'", table, column))
+			require.NoError(t, err, "verify column not exists %s.%s", table, column)
+			return len(result.Rows) == 0
+		},
+		func() string {
+			return fmt.Sprintf("column '%s' still exists in table '%s' after waiting for schema cache refresh", column, table)
+		},
+	)
 }
 
 // --- Branch database test helpers ---
@@ -379,40 +379,45 @@ const (
 // waitForBranchReady polls until a branch is ready or the deadline is exceeded.
 func waitForBranchReady(t *testing.T, ctx context.Context, branchName string) {
 	t.Helper()
-	deadline := time.Now().Add(shortPollTimeout)
-	for time.Now().Before(deadline) {
-		got, err := testClient.GetBranch(ctx, &ps.GetDatabaseBranchRequest{
-			Organization: testOrg,
-			Database:     testDB,
-			Branch:       branchName,
-		})
-		require.NoError(t, err, "GetBranch(%s)", branchName)
-		if got.Ready {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Failf(t, "branch not ready", "branch %q not ready after %v", branchName, shortPollTimeout)
+	testutil.Poll(t, shortPollTimeout, 500*time.Millisecond,
+		func() bool {
+			got, err := testClient.GetBranch(ctx, &ps.GetDatabaseBranchRequest{
+				Organization: testOrg,
+				Database:     testDB,
+				Branch:       branchName,
+			})
+			require.NoError(t, err, "GetBranch(%s)", branchName)
+			return got.Ready
+		},
+		func() string {
+			return fmt.Sprintf("branch %q not ready after %v", branchName, shortPollTimeout)
+		},
+	)
 }
 
 // waitForDeployReady polls until a deploy request reaches "ready" or "no_changes" state.
 func waitForDeployReady(t *testing.T, ctx context.Context, number uint64) *ps.DeployRequest {
 	t.Helper()
-	deadline := time.Now().Add(shortPollTimeout)
-	for time.Now().Before(deadline) {
-		dr, err := testClient.GetDeployRequest(ctx, &ps.GetDeployRequestRequest{
-			Organization: testOrg,
-			Database:     testDB,
-			Number:       number,
-		})
-		require.NoError(t, err, "GetDeployRequest(%d)", number)
-		if dr.DeploymentState == drState.Ready || dr.DeploymentState == drState.NoChanges {
-			return dr
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Failf(t, "deploy not ready", "deploy request %d not ready after %v", number, shortPollTimeout)
-	return nil
+	var result *ps.DeployRequest
+	testutil.Poll(t, shortPollTimeout, 500*time.Millisecond,
+		func() bool {
+			dr, err := testClient.GetDeployRequest(ctx, &ps.GetDeployRequestRequest{
+				Organization: testOrg,
+				Database:     testDB,
+				Number:       number,
+			})
+			require.NoError(t, err, "GetDeployRequest(%d)", number)
+			if dr.DeploymentState == drState.Ready || dr.DeploymentState == drState.NoChanges {
+				result = dr
+				return true
+			}
+			return false
+		},
+		func() string {
+			return fmt.Sprintf("deploy request %d not ready after %v", number, shortPollTimeout)
+		},
+	)
+	return result
 }
 
 // waitForDeployState polls until a deploy request reaches one of the specified states.
@@ -423,33 +428,40 @@ func waitForDeployState(t *testing.T, ctx context.Context, number uint64, wantSt
 		wantSet[s] = true
 	}
 	start := time.Now()
-	deadline := time.Now().Add(longPollTimeout)
-	var lastState string
-	for time.Now().Before(deadline) {
-		dr, err := testClient.GetDeployRequest(ctx, &ps.GetDeployRequestRequest{
-			Organization: testOrg,
-			Database:     testDB,
-			Number:       number,
-		})
-		require.NoError(t, err, "GetDeployRequest(%d)", number)
-		if dr.DeploymentState != lastState {
-			t.Logf("deploy %d: %s → %s (%s elapsed)", number, lastState, dr.DeploymentState, time.Since(start).Round(time.Millisecond))
-		}
-		lastState = dr.DeploymentState
-		if wantSet[lastState] {
-			return dr
-		}
-		// Fail fast on terminal error states (unless we're specifically waiting for them)
-		if lastState == drState.CompleteError && !wantSet[drState.CompleteError] {
-			require.Failf(t, "deploy failed", "deploy %d reached complete_error", number)
-		}
-		if lastState == drState.Error && !wantSet[drState.Error] {
-			require.Failf(t, "deploy failed", "deploy %d reached error", number)
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Failf(t, "deploy state timeout", "deploy %d: expected one of %v, last state was %q", number, wantStates, lastState)
-	return nil
+	var (
+		lastState string
+		result    *ps.DeployRequest
+	)
+	testutil.Poll(t, longPollTimeout, 500*time.Millisecond,
+		func() bool {
+			dr, err := testClient.GetDeployRequest(ctx, &ps.GetDeployRequestRequest{
+				Organization: testOrg,
+				Database:     testDB,
+				Number:       number,
+			})
+			require.NoError(t, err, "GetDeployRequest(%d)", number)
+			if dr.DeploymentState != lastState {
+				t.Logf("deploy %d: %s → %s (%s elapsed)", number, lastState, dr.DeploymentState, time.Since(start).Round(time.Millisecond))
+			}
+			lastState = dr.DeploymentState
+			if wantSet[lastState] {
+				result = dr
+				return true
+			}
+			// Fail fast on terminal error states (unless we're specifically waiting for them)
+			if lastState == drState.CompleteError && !wantSet[drState.CompleteError] {
+				require.Failf(t, "deploy failed", "deploy %d reached complete_error", number)
+			}
+			if lastState == drState.Error && !wantSet[drState.Error] {
+				require.Failf(t, "deploy failed", "deploy %d reached error", number)
+			}
+			return false
+		},
+		func() string {
+			return fmt.Sprintf("deploy %d: expected one of %v, last state was %q", number, wantStates, lastState)
+		},
+	)
+	return result
 }
 
 // cleanupActiveDeployRequests skips-revert or cancels any active deploy requests

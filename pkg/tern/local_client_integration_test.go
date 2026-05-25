@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/mysql"
 
+	waitutil "github.com/block/schemabot/e2e/testutil"
 	"github.com/block/schemabot/pkg/engine"
 	"github.com/block/schemabot/pkg/engine/spirit"
 	ternv1 "github.com/block/schemabot/pkg/proto/ternv1"
@@ -224,37 +225,35 @@ func buildSchemaWithAllTables(t *testing.T, dsn string, testTableSchemas map[str
 func waitForApplyComplete(t *testing.T, client *LocalClient, ctx context.Context, applyID string) {
 	t.Helper()
 	sawRunning := false
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		progress, err := client.Progress(ctx, &ternv1.ProgressRequest{
-			Type:     "mysql",
-			Database: "testdb",
-			ApplyId:  applyID,
-		})
-		if err != nil {
-			t.Logf("Progress() error: %v", err)
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
-		switch progress.State {
-		case ternv1.State_STATE_COMPLETED:
-			return
-		case ternv1.State_STATE_FAILED:
-			t.Fatalf("apply %s failed: %s", applyID, progress.ErrorMessage)
-		case ternv1.State_STATE_NO_ACTIVE_CHANGE:
-			// NO_ACTIVE_CHANGE means "no tasks found for this database" — either
-			// the background goroutine hasn't created tasks yet, or they've
-			// been cleaned up after completion. Only treat as done if we
-			// previously saw the apply in progress.
-			if sawRunning {
-				return
+	waitutil.Poll(t, 30*time.Second, 500*time.Millisecond,
+		func() bool {
+			progress, err := client.Progress(ctx, &ternv1.ProgressRequest{
+				Type:     "mysql",
+				Database: "testdb",
+				ApplyId:  applyID,
+			})
+			if err != nil {
+				t.Logf("Progress() error: %v", err)
+				return false
 			}
-		default:
-			sawRunning = true
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	t.Fatal("apply did not complete within 30s")
+			switch progress.State {
+			case ternv1.State_STATE_COMPLETED:
+				return true
+			case ternv1.State_STATE_FAILED:
+				t.Fatalf("apply %s failed: %s", applyID, progress.ErrorMessage)
+			case ternv1.State_STATE_NO_ACTIVE_CHANGE:
+				// NO_ACTIVE_CHANGE means "no tasks found for this database" — either
+				// the background goroutine hasn't created tasks yet, or they've
+				// been cleaned up after completion. Only treat as done if we
+				// previously saw the apply in progress.
+				return sawRunning
+			default:
+				sawRunning = true
+			}
+			return false
+		},
+		func() string { return fmt.Sprintf("apply %s did not complete within 30s", applyID) },
+	)
 }
 
 type retryableFailureEngine struct {
@@ -891,23 +890,22 @@ func TestLocalClient_Apply_MultiTableSequential(t *testing.T) {
 
 	// Wait for schema changes to complete (both tables should be modified)
 	// Poll for completion rather than fixed sleep
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		progress, err := client.Progress(ctx, &ternv1.ProgressRequest{
-			Type:     "mysql",
-			Database: "testdb",
-		})
-		if err != nil {
-			t.Logf("Progress() error: %v", err)
-		} else {
-			t.Logf("Progress state: %v", progress.State)
-			if progress.State == ternv1.State_STATE_COMPLETED ||
-				progress.State == ternv1.State_STATE_NO_ACTIVE_CHANGE {
-				break
+	waitutil.Poll(t, 30*time.Second, 500*time.Millisecond,
+		func() bool {
+			progress, err := client.Progress(ctx, &ternv1.ProgressRequest{
+				Type:     "mysql",
+				Database: "testdb",
+			})
+			if err != nil {
+				t.Logf("Progress() error: %v", err)
+				return false
 			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+			t.Logf("Progress state: %v", progress.State)
+			return progress.State == ternv1.State_STATE_COMPLETED ||
+				progress.State == ternv1.State_STATE_NO_ACTIVE_CHANGE
+		},
+		func() string { return "schema changes did not complete within 30s" },
+	)
 
 	// Verify BOTH tables were modified
 
@@ -1067,15 +1065,16 @@ func TestLocalClient_Apply_AtomicHeartbeat(t *testing.T) {
 	require.True(t, applyResp.Accepted, "apply rejected: %s", applyResp.ErrorMessage)
 
 	// Wait for waiting_for_cutover — the apply sits here while heartbeat keeps running
-	deadline := time.Now().Add(30 * time.Second)
 	var st string
-	for time.Now().Before(deadline) {
-		err = db.QueryRowContext(ctx, "SELECT state FROM applies WHERE apply_identifier = ?", applyResp.ApplyId).Scan(&st)
-		if err == nil && (st == state.Apply.WaitingForCutover || st == state.Apply.Completed || st == state.Apply.Failed) {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	waitutil.Poll(t, 30*time.Second, 500*time.Millisecond,
+		func() bool {
+			err = db.QueryRowContext(ctx, "SELECT state FROM applies WHERE apply_identifier = ?", applyResp.ApplyId).Scan(&st)
+			return err == nil && (st == state.Apply.WaitingForCutover || st == state.Apply.Completed || st == state.Apply.Failed)
+		},
+		func() string {
+			return fmt.Sprintf("apply %s did not reach a stable state, last: %q", applyResp.ApplyId, st)
+		},
+	)
 	require.Equal(t, state.Apply.WaitingForCutover, st, "apply should reach waiting_for_cutover")
 
 	// Snapshot updated_at while in waiting_for_cutover
@@ -1102,14 +1101,15 @@ func TestLocalClient_Apply_AtomicHeartbeat(t *testing.T) {
 	require.NoError(t, err, "cutover")
 
 	// Wait for completion with a fresh deadline
-	cutoverDeadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(cutoverDeadline) {
-		err = db.QueryRowContext(ctx, "SELECT state FROM applies WHERE apply_identifier = ?", applyResp.ApplyId).Scan(&st)
-		if err == nil && (st == state.Apply.Completed || st == state.Apply.Failed) {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	waitutil.Poll(t, 30*time.Second, 500*time.Millisecond,
+		func() bool {
+			err = db.QueryRowContext(ctx, "SELECT state FROM applies WHERE apply_identifier = ?", applyResp.ApplyId).Scan(&st)
+			return err == nil && (st == state.Apply.Completed || st == state.Apply.Failed)
+		},
+		func() string {
+			return fmt.Sprintf("apply %s did not reach terminal state, last: %q", applyResp.ApplyId, st)
+		},
+	)
 
 	assert.Equal(t, state.Apply.Completed, st, "apply should be completed")
 }

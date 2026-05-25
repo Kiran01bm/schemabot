@@ -108,22 +108,7 @@ func startTestServerWithSchedulerInterval(t *testing.T, appDBName, appDSN string
 	addr := listener.Addr().String()
 
 	// Wait for HTTP server readiness
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			require.Fail(t, "timeout waiting for HTTP server")
-		}
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+"/health", nil)
-		require.NoError(t, err)
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForHTTP(t, "http://"+addr+"/health", 5*time.Second)
 
 	t.Cleanup(func() {
 		_ = server.Close()

@@ -84,18 +84,8 @@ func TestResolveApplyID_ControlOperations(t *testing.T) {
 	t.Cleanup(func() { utils.CloseAndLog(httpSrv) })
 	baseURL := "http://" + httpLis.Addr().String()
 
-	// Wait for HTTP server to be ready (poll, no sleep).
-	readyDeadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(readyDeadline) {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Wait for HTTP server to be ready.
+	waitForHTTP(t, baseURL+"/health", 5*time.Second)
 
 	// 3. Plan: create a table with a unique name to avoid conflicts with other tests.
 	tableName := fmt.Sprintf("resolve_%d", time.Now().UnixNano()%100000)

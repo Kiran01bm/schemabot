@@ -21,25 +21,24 @@ func waitForIndex(t *testing.T, dsn, tableName, indexName string, timeout time.D
 	defer utils.CloseAndLog(db)
 	require.NoError(t, db.PingContext(t.Context()))
 
-	deadline := time.Now().Add(timeout)
 	var lastErr error
-	for time.Now().Before(deadline) {
-		rows, err := db.QueryContext(t.Context(), fmt.Sprintf("SHOW INDEX FROM `%s` WHERE Key_name = ?", tableName), indexName)
-		if err == nil {
+	testutil.Poll(t, timeout, 500*time.Millisecond,
+		func() bool {
+			rows, err := db.QueryContext(t.Context(), fmt.Sprintf("SHOW INDEX FROM `%s` WHERE Key_name = ?", tableName), indexName)
+			if err != nil {
+				lastErr = err
+				return false
+			}
 			found := rows.Next()
 			require.NoError(t, rows.Close())
-			if found {
-				return
-			}
-		} else {
-			lastErr = err
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	var tblName, createStmt string
-	_ = db.QueryRowContext(t.Context(), fmt.Sprintf("SHOW CREATE TABLE `%s`", tableName)).Scan(&tblName, &createStmt)
-	require.Failf(t, "timeout", "timeout waiting for index %s on %s, last query error: %v, table structure: %s", indexName, tableName, lastErr, createStmt)
+			return found
+		},
+		func() string {
+			var tblName, createStmt string
+			_ = db.QueryRowContext(t.Context(), fmt.Sprintf("SHOW CREATE TABLE `%s`", tableName)).Scan(&tblName, &createStmt)
+			return fmt.Sprintf("timeout waiting for index %s on %s, last query error: %v, table structure: %s", indexName, tableName, lastErr, createStmt)
+		},
+	)
 }
 
 func markApplyHeartbeatStale(t *testing.T, dsn, applyID, storageName string) {
@@ -75,22 +74,23 @@ func waitForApplyExternalID(t *testing.T, applyID string, timeout time.Duration)
 	defer utils.CloseAndLog(db)
 	require.NoError(t, db.PingContext(t.Context()))
 
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		var externalID string
-		err = db.QueryRowContext(t.Context(),
-			"SELECT external_id FROM applies WHERE apply_identifier = ?",
-			applyID,
-		).Scan(&externalID)
-		if err == nil && externalID != "" {
-			return externalID
-		}
-		lastErr = err
-		time.Sleep(300 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for control-plane apply %s to reference the data-plane apply, last error: %v", applyID, lastErr)
-	return ""
+	var (
+		lastErr    error
+		externalID string
+	)
+	testutil.Poll(t, timeout, 300*time.Millisecond,
+		func() bool {
+			lastErr = db.QueryRowContext(t.Context(),
+				"SELECT external_id FROM applies WHERE apply_identifier = ?",
+				applyID,
+			).Scan(&externalID)
+			return lastErr == nil && externalID != ""
+		},
+		func() string {
+			return fmt.Sprintf("timeout waiting for control-plane apply %s to reference the data-plane apply, last error: %v", applyID, lastErr)
+		},
+	)
+	return externalID
 }
 
 type runningIndexApply struct {

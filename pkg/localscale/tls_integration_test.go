@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/schemabot/e2e/testutil"
 	"github.com/block/schemabot/pkg/localscale"
 	"github.com/block/schemabot/pkg/psclient"
 )
@@ -74,16 +75,15 @@ func TestMTLS_BranchConnection(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for the branch snapshot to complete before requesting credentials.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		br, brErr := client.GetBranch(ctx, &ps.GetDatabaseBranchRequest{
-			Organization: "test-org", Database: "testdb", Branch: "tls-test-branch",
-		})
-		if brErr == nil && br.Ready {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	testutil.Poll(t, 15*time.Second, 500*time.Millisecond,
+		func() bool {
+			br, brErr := client.GetBranch(ctx, &ps.GetDatabaseBranchRequest{
+				Organization: "test-org", Database: "testdb", Branch: "tls-test-branch",
+			})
+			return brErr == nil && br.Ready
+		},
+		func() string { return "branch tls-test-branch did not become ready" },
+	)
 
 	pw, err := client.CreateBranchPassword(ctx, &ps.DatabaseBranchPasswordRequest{
 		Organization: "test-org",

@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/block/schemabot/e2e/testutil"
 	schemabotapi "github.com/block/schemabot/pkg/api"
 	"github.com/block/schemabot/pkg/state"
 	"github.com/block/schemabot/pkg/storage/mysqlstore"
@@ -149,7 +150,7 @@ func TestHybridMode_LocalAndNamedRemoteTargets(t *testing.T) {
 	addr := listener.Addr().String()
 
 	// Wait for server readiness
-	waitForHTTPReady(t, addr, 5*time.Second)
+	waitForHTTP(t, "http://"+addr+"/health", 5*time.Second)
 
 	// =========================================================================
 	// Test 1: Plan for local-mode database (uses LocalClient)
@@ -282,15 +283,16 @@ func TestHybridMode_LocalAndNamedRemoteTargets(t *testing.T) {
 	t.Logf("gRPC apply: external_id=%q (non-empty = gRPC mode confirmed)", grpcApply.ExternalID)
 
 	// Wait for pollForCompletion to sync gRPC apply state to storage
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		grpcApply, err = schemabotStorage.Applies().GetByApplyIdentifier(ctx, grpcApplyID)
-		require.NoError(t, err, "refresh grpc apply")
-		if grpcApply.State == state.Apply.Completed {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	testutil.Poll(t, 5*time.Second, 100*time.Millisecond,
+		func() bool {
+			grpcApply, err = schemabotStorage.Applies().GetByApplyIdentifier(ctx, grpcApplyID)
+			require.NoError(t, err, "refresh grpc apply")
+			return grpcApply.State == state.Apply.Completed
+		},
+		func() string {
+			return fmt.Sprintf("gRPC apply should be completed in local storage, last state: %q", grpcApply.State)
+		},
+	)
 	assert.Equal(t, state.Apply.Completed, grpcApply.State,
 		"gRPC apply should be completed in local storage")
 
@@ -435,26 +437,4 @@ func startTernGRPCForDB(t *testing.T, appDSN, dbName string) (string, error) {
 	}
 
 	return grpcAddress, nil
-}
-
-// waitForHTTPReady polls the health endpoint until it returns 200 or the
-// timeout expires.
-func waitForHTTPReady(t *testing.T, addr string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if time.Now().After(deadline) {
-			require.Fail(t, "timeout waiting for HTTP server readiness")
-		}
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+"/health", nil)
-		require.NoError(t, err)
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }

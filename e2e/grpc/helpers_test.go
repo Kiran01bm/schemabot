@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/schemabot/e2e/testutil"
 	"github.com/block/schemabot/pkg/state"
 	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
@@ -247,35 +248,39 @@ func grpcProgressByApplyID(t *testing.T, applyID string) grpcProgressResponse {
 
 func grpcWaitForState(t *testing.T, database, env, expectedState string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
 	var lastState string
-	for time.Now().Before(deadline) {
-		prog := grpcProgress(t, database, env)
-		lastState = prog.State
-		if state.IsState(prog.State, expectedState) {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "waiting for state %q, last state: %s", expectedState, lastState)
+	testutil.Poll(t, timeout, 500*time.Millisecond,
+		func() bool {
+			prog := grpcProgress(t, database, env)
+			lastState = prog.State
+			return state.IsState(prog.State, expectedState)
+		},
+		func() string {
+			return fmt.Sprintf("waiting for state %q, last state: %s", expectedState, lastState)
+		},
+	)
 }
 
 func grpcWaitForAnyState(t *testing.T, database, env string, expectedStates []string, timeout time.Duration) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var lastState string
-	for time.Now().Before(deadline) {
-		prog := grpcProgress(t, database, env)
-		lastState = prog.State
-		for _, expectedState := range expectedStates {
-			if state.IsState(prog.State, expectedState) {
-				return prog.State
+	var lastState, matched string
+	testutil.Poll(t, timeout, 500*time.Millisecond,
+		func() bool {
+			prog := grpcProgress(t, database, env)
+			lastState = prog.State
+			for _, expectedState := range expectedStates {
+				if state.IsState(prog.State, expectedState) {
+					matched = prog.State
+					return true
+				}
 			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "waiting for any of states %v, last state: %s", expectedStates, lastState)
-	return ""
+			return false
+		},
+		func() string {
+			return fmt.Sprintf("waiting for any of states %v, last state: %s", expectedStates, lastState)
+		},
+	)
+	return matched
 }
 
 // grpcEnsureNoActiveChange cleans up any active schema change for the given database.
@@ -522,26 +527,28 @@ func grpcStatus(t *testing.T) grpcStatusResponse {
 // Set negate to true to wait until the state is NOT the expected state.
 func grpcWaitForStatusState(t *testing.T, applyID, expectedState string, negate bool, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
 	var lastState string
-	for time.Now().Before(deadline) {
-		s := grpcStatus(t)
-		for i := range s.Applies {
-			if s.Applies[i].ApplyID == applyID {
-				lastState = s.Applies[i].State
-				matched := state.IsState(lastState, expectedState)
-				if (!negate && matched) || (negate && !matched) {
-					return
+	testutil.Poll(t, timeout, 500*time.Millisecond,
+		func() bool {
+			s := grpcStatus(t)
+			for i := range s.Applies {
+				if s.Applies[i].ApplyID == applyID {
+					lastState = s.Applies[i].State
+					matched := state.IsState(lastState, expectedState)
+					if (!negate && matched) || (negate && !matched) {
+						return true
+					}
 				}
 			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if negate {
-		require.Failf(t, "timeout", "status still shows %q for apply %s, expected NOT %q", lastState, applyID, expectedState)
-	} else {
-		require.Failf(t, "timeout", "status shows %q for apply %s, expected %q", lastState, applyID, expectedState)
-	}
+			return false
+		},
+		func() string {
+			if negate {
+				return fmt.Sprintf("status still shows %q for apply %s, expected NOT %q", lastState, applyID, expectedState)
+			}
+			return fmt.Sprintf("status shows %q for apply %s, expected %q", lastState, applyID, expectedState)
+		},
+	)
 }
 
 // uniqueGRPCTableName generates a unique table name for test isolation.

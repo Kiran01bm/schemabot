@@ -43,37 +43,40 @@ func crashPod(t *testing.T, instance string) string {
 func waitForReplacementPodReady(t *testing.T, instance, previousPod string, timeout time.Duration) {
 	t.Helper()
 	selector := "app.kubernetes.io/instance=" + instance
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		output := runKubectl(t, "get", "pod", "-n", k8sNamespace, "-l", selector, "-o", "json")
+	testutil.Poll(t, timeout, 500*time.Millisecond,
+		func() bool {
+			output := runKubectl(t, "get", "pod", "-n", k8sNamespace, "-l", selector, "-o", "json")
 
-		var podList struct {
-			Items []struct {
-				Metadata struct {
-					Name string `json:"name"`
-				} `json:"metadata"`
-				Status struct {
-					Conditions []struct {
-						Type   string `json:"type"`
-						Status string `json:"status"`
-					} `json:"conditions"`
-				} `json:"status"`
-			} `json:"items"`
-		}
-		require.NoError(t, json.Unmarshal([]byte(output), &podList))
+			var podList struct {
+				Items []struct {
+					Metadata struct {
+						Name string `json:"name"`
+					} `json:"metadata"`
+					Status struct {
+						Conditions []struct {
+							Type   string `json:"type"`
+							Status string `json:"status"`
+						} `json:"conditions"`
+					} `json:"status"`
+				} `json:"items"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(output), &podList))
 
-		for _, pod := range podList.Items {
-			if pod.Metadata.Name != previousPod {
-				for _, condition := range pod.Status.Conditions {
-					if condition.Type == "Ready" && condition.Status == "True" {
-						return
+			for _, pod := range podList.Items {
+				if pod.Metadata.Name != previousPod {
+					for _, condition := range pod.Status.Conditions {
+						if condition.Type == "Ready" && condition.Status == "True" {
+							return true
+						}
 					}
 				}
 			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for replacement %s pod after deleting %s", instance, previousPod)
+			return false
+		},
+		func() string {
+			return fmt.Sprintf("timeout waiting for replacement %s pod after deleting %s", instance, previousPod)
+		},
+	)
 }
 
 func waitForTernHealth(t *testing.T, endpoint, deployment, environment string, timeout time.Duration) {
@@ -84,29 +87,29 @@ func waitForTernHealth(t *testing.T, endpoint, deployment, environment string, t
 
 func waitForHTTPStatus(t *testing.T, url string, expectedStatus int, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var lastStatus int
-	var lastErr error
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		require.NoError(t, err)
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			lastStatus = resp.StatusCode
-			closeErr := resp.Body.Close()
-			cancel()
-			require.NoError(t, closeErr)
-			if lastStatus == expectedStatus {
-				return
+	var (
+		lastStatus int
+		lastErr    error
+	)
+	testutil.Poll(t, timeout, 500*time.Millisecond,
+		func() bool {
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			require.NoError(t, err)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				lastErr = err
+				return false
 			}
-		} else {
-			cancel()
-			lastErr = err
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for %s to return status %d, last status: %d, last error: %v", url, expectedStatus, lastStatus, lastErr)
+			lastStatus = resp.StatusCode
+			require.NoError(t, resp.Body.Close())
+			return lastStatus == expectedStatus
+		},
+		func() string {
+			return fmt.Sprintf("timeout waiting for %s to return status %d, last status: %d, last error: %v", url, expectedStatus, lastStatus, lastErr)
+		},
+	)
 }
 
 func freeLocalPort(t *testing.T) int {

@@ -1490,24 +1490,25 @@ func createBranchViaLocalScale(t *testing.T, branchName string) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateBranch failed")
 
 	// Poll until branch is ready
-	deadline := time.Now().Add(testutil.PollDeadline)
-	for time.Now().Before(deadline) {
-		getReq, _ := http.NewRequestWithContext(ctx, http.MethodGet,
-			localscaleURL+"/v1/organizations/localscale-staging/databases/"+vitessDB+"/branches/"+branchName, nil)
-		resp, err := http.DefaultClient.Do(getReq)
-		if err == nil {
+	testutil.Poll(t, testutil.PollDeadline, 500*time.Millisecond,
+		func() bool {
+			getReq, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+				localscaleURL+"/v1/organizations/localscale-staging/databases/"+vitessDB+"/branches/"+branchName, nil)
+			resp, err := http.DefaultClient.Do(getReq)
+			if err != nil {
+				return false
+			}
 			var branch struct {
 				Ready bool `json:"ready"`
 			}
 			_ = json.NewDecoder(resp.Body).Decode(&branch)
 			resp.Body.Close()
-			if branch.Ready {
-				return
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	t.Fatalf("branch %s not ready within deadline", branchName)
+			return branch.Ready
+		},
+		func() string {
+			return fmt.Sprintf("branch %s not ready within deadline", branchName)
+		},
+	)
 }
 
 // TestVitess_Apply_BranchReuse tests the --branch flag for reusing an existing

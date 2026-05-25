@@ -7,6 +7,7 @@ package testutil
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -22,6 +23,26 @@ const ProgressTimeout = 5 * time.Second
 
 // PollDeadline is the maximum time to wait when polling for a state transition.
 const PollDeadline = 30 * time.Second
+
+// PollInterval is the default sleep between polling attempts for state
+// transitions observed via the progress API.
+const PollInterval = 300 * time.Millisecond
+
+// Poll repeatedly invokes cond every interval until cond returns true or the
+// timeout expires. On timeout the test fails with failureMsg's return value,
+// which is computed lazily so callers can reference state captured by cond via
+// closure (e.g. the most recent observed value).
+func Poll(t *testing.T, timeout, interval time.Duration, cond func() bool, failureMsg func() string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(interval)
+	}
+	require.Fail(t, "timeout", failureMsg())
+}
 
 // FetchProgress calls the progress API by apply ID and returns the
 // full ProgressResponse with its State normalized.
@@ -41,19 +62,20 @@ func FetchProgress(endpoint, applyID string) (*apitypes.ProgressResponse, error)
 func WaitForState(t *testing.T, endpoint, applyID, expectedState string, timeout time.Duration) {
 	t.Helper()
 	expected := state.NormalizeState(expectedState)
-	deadline := time.Now().Add(timeout)
 	var lastState string
-	for time.Now().Before(deadline) {
-		result, err := FetchProgress(endpoint, applyID)
-		if err == nil {
-			lastState = result.State
-			if result.State == expected {
-				return
+	Poll(t, timeout, PollInterval,
+		func() bool {
+			result, err := FetchProgress(endpoint, applyID)
+			if err != nil {
+				return false
 			}
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for apply %s state %q, last state: %q", applyID, expectedState, lastState)
+			lastState = result.State
+			return result.State == expected
+		},
+		func() string {
+			return fmt.Sprintf("timeout waiting for apply %s state %q, last state: %q", applyID, expectedState, lastState)
+		},
+	)
 }
 
 // WaitForAnyState polls the progress API by apply ID until any of the expected
@@ -64,20 +86,25 @@ func WaitForAnyState(t *testing.T, endpoint, applyID string, expectedStates []st
 	for i, s := range expectedStates {
 		expected[i] = state.NormalizeState(s)
 	}
-	deadline := time.Now().Add(timeout)
-	var lastState string
-	for time.Now().Before(deadline) {
-		result, err := FetchProgress(endpoint, applyID)
-		if err == nil {
+	var lastState, matched string
+	Poll(t, timeout, PollInterval,
+		func() bool {
+			result, err := FetchProgress(endpoint, applyID)
+			if err != nil {
+				return false
+			}
 			lastState = result.State
 			for i, exp := range expected {
 				if lastState == exp {
-					return expectedStates[i]
+					matched = expectedStates[i]
+					return true
 				}
 			}
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for apply %s any of states %v, last state: %q", applyID, expectedStates, lastState)
-	return ""
+			return false
+		},
+		func() string {
+			return fmt.Sprintf("timeout waiting for apply %s any of states %v, last state: %q", applyID, expectedStates, lastState)
+		},
+	)
+	return matched
 }

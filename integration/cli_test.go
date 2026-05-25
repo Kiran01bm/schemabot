@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,8 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/schemabot/e2e/testutil"
 	schemabotapi "github.com/block/schemabot/pkg/api"
-	"github.com/block/schemabot/pkg/state"
 	"github.com/block/schemabot/pkg/storage/mysqlstore"
 	"github.com/block/schemabot/pkg/tern"
 )
@@ -809,23 +808,7 @@ func waitForApplyFromOutput(t *testing.T, endpoint, cliOutput, expectedState str
 // waitForAnyStateByApplyID polls the progress API until any of the expected states is reached or timeout.
 func waitForAnyStateByApplyID(t *testing.T, endpoint, applyID string, expectedStates []string, timeout time.Duration) {
 	t.Helper()
-	normalized := make([]string, len(expectedStates))
-	for i, s := range expectedStates {
-		normalized[i] = state.NormalizeState(s)
-	}
-	deadline := time.Now().Add(timeout)
-	var lastState string
-	for time.Now().Before(deadline) {
-		s, err := fetchProgressState(endpoint, applyID)
-		if err == nil {
-			lastState = s
-			if slices.Contains(normalized, s) {
-				return
-			}
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for apply %s state %v, last state: %q", applyID, expectedStates, lastState)
+	testutil.WaitForAnyState(t, endpoint, applyID, expectedStates, timeout)
 }
 
 // startSchemaBotLocal starts a SchemaBot server with embedded LocalClient (no gRPC).
@@ -1117,21 +1100,19 @@ func clearStorageDB(t *testing.T, db *sql.DB) {
 
 func waitForHTTP(t *testing.T, url string, timeout time.Duration) {
 	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
-		require.NoError(t, err, "create request")
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return
+	testutil.Poll(t, timeout, 50*time.Millisecond,
+		func() bool {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
+			require.NoError(t, err, "create request")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return false
 			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for %s", url)
+			_ = resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		},
+		func() string { return "timeout waiting for " + url },
+	)
 }
 
 // TestCLI_Volume tests the volume command validates inputs correctly.

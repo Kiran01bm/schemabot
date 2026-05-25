@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/schemabot/e2e/testutil"
 	schemabotapi "github.com/block/schemabot/pkg/api"
 	ternv1 "github.com/block/schemabot/pkg/proto/ternv1"
 	"github.com/block/schemabot/pkg/state"
@@ -162,20 +163,22 @@ func startSchemaBot(t *testing.T, ternGRPCAddr string) string {
 func waitForStoredExternalID(t *testing.T, applies storage.ApplyStore, applyIdentifier string, timeout time.Duration) *storage.Apply {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
-	var storedApply *storage.Apply
-	for time.Now().Before(deadline) {
-		apply, err := applies.GetByApplyIdentifier(t.Context(), applyIdentifier)
-		require.NoError(t, err, "get apply by identifier")
-		if apply != nil && apply.ExternalID != "" {
-			return apply
-		}
-		storedApply = apply
-		time.Sleep(20 * time.Millisecond)
-	}
-	require.NotNil(t, storedApply, "apply %s not found in storage", applyIdentifier)
-	require.Failf(t, "timeout waiting for external_id", "apply %s was not dispatched within %s", applyIdentifier, timeout)
-	return storedApply
+	var result *storage.Apply
+	testutil.Poll(t, timeout, 20*time.Millisecond,
+		func() bool {
+			apply, err := applies.GetByApplyIdentifier(t.Context(), applyIdentifier)
+			require.NoError(t, err, "get apply by identifier")
+			result = apply
+			return apply != nil && apply.ExternalID != ""
+		},
+		func() string {
+			if result == nil {
+				return fmt.Sprintf("apply %s not found in storage within %s", applyIdentifier, timeout)
+			}
+			return fmt.Sprintf("apply %s was not dispatched within %s", applyIdentifier, timeout)
+		},
+	)
+	return result
 }
 
 // TestGRPC_ExternalID_StoredOnApply verifies that when SchemaBot calls a remote
@@ -379,19 +382,19 @@ func TestGRPC_TaskStateUpdatedOnCompletion(t *testing.T) {
 	schemabotAddr := listener.Addr().String()
 
 	// Wait for HTTP server readiness
-	healthDeadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(healthDeadline) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+schemabotAddr+"/health", nil)
-		require.NoError(t, err)
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				break
+	testutil.Poll(t, 5*time.Second, 10*time.Millisecond,
+		func() bool {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+schemabotAddr+"/health", nil)
+			require.NoError(t, err)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return false
 			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+			_ = resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		},
+		func() string { return "schemabot HTTP server did not become healthy" },
+	)
 
 	// Step 1: Plan — create a new table
 	schemaSQL := `CREATE TABLE task_state_test (
@@ -431,18 +434,17 @@ func TestGRPC_TaskStateUpdatedOnCompletion(t *testing.T) {
 	// waitForState polls the HTTP API (which calls remote Tern's Progress
 	// RPC), but the local storage update happens asynchronously in the poller goroutine.
 	var storedApply *storage.Apply
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		storedApply, err = schemabotStorage.Applies().GetByApplyIdentifier(ctx, applyID)
-		require.NoError(t, err, "get apply by identifier")
-		require.NotNil(t, storedApply, "apply not found")
-		if storedApply.State == state.Apply.Completed {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	require.Equal(t, state.Apply.Completed, storedApply.State,
-		"apply record should be completed in local storage")
+	testutil.Poll(t, 5*time.Second, 100*time.Millisecond,
+		func() bool {
+			storedApply, err = schemabotStorage.Applies().GetByApplyIdentifier(ctx, applyID)
+			require.NoError(t, err, "get apply by identifier")
+			require.NotNil(t, storedApply, "apply not found")
+			return storedApply.State == state.Apply.Completed
+		},
+		func() string {
+			return fmt.Sprintf("apply record should be completed in local storage, last state: %q", storedApply.State)
+		},
+	)
 
 	// Step 5: Verify task records in SchemaBot's storage have terminal state.
 	tasks, err := schemabotStorage.Tasks().GetByApplyID(ctx, storedApply.ID)

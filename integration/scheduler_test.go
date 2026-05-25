@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/schemabot/e2e/testutil"
 	schemabotapi "github.com/block/schemabot/pkg/api"
 	"github.com/block/schemabot/pkg/proto/ternv1"
 	"github.com/block/schemabot/pkg/state"
@@ -196,16 +197,20 @@ func TestScheduler_BasicClaimAndResume(t *testing.T) {
 	ts.Service.StartScheduler(t.Context())
 	defer ts.Service.StopScheduler()
 
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		apply, err := ts.Storage.Applies().Get(ctx, staleID)
-		require.NoError(t, err)
-		if apply != nil && apply.State == state.Apply.Completed {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	t.Fatal("timeout: scheduler did not resume stale apply")
+	var lastState string
+	testutil.Poll(t, 20*time.Second, 500*time.Millisecond,
+		func() bool {
+			apply, err := ts.Storage.Applies().Get(ctx, staleID)
+			require.NoError(t, err)
+			if apply != nil {
+				lastState = apply.State
+			}
+			return apply != nil && apply.State == state.Apply.Completed
+		},
+		func() string {
+			return fmt.Sprintf("scheduler did not resume stale apply %d, last state: %q", staleID, lastState)
+		},
+	)
 }
 
 func TestScheduler_ClaimOrdering(t *testing.T) {
@@ -635,34 +640,33 @@ func seedStaleSchedulerApply(
 func waitForSchedulerAppliesCompleted(t *testing.T, stor *mysqlstore.Storage, applyIDs []int64, timeout time.Duration) {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
 	completed := make(map[int64]bool, len(applyIDs))
-	for time.Now().Before(deadline) {
-		for _, applyID := range applyIDs {
-			if completed[applyID] {
-				continue
+	testutil.Poll(t, timeout, 100*time.Millisecond,
+		func() bool {
+			for _, applyID := range applyIDs {
+				if completed[applyID] {
+					continue
+				}
+				apply, err := stor.Applies().Get(t.Context(), applyID)
+				require.NoError(t, err)
+				if apply != nil && apply.State == state.Apply.Completed {
+					completed[applyID] = true
+				}
 			}
-			apply, err := stor.Applies().Get(t.Context(), applyID)
-			require.NoError(t, err)
-			if apply != nil && apply.State == state.Apply.Completed {
-				completed[applyID] = true
+			return len(completed) == len(applyIDs)
+		},
+		func() string {
+			states := make(map[int64]string, len(applyIDs))
+			for _, applyID := range applyIDs {
+				apply, err := stor.Applies().Get(t.Context(), applyID)
+				require.NoError(t, err)
+				if apply != nil {
+					states[applyID] = apply.State
+				}
 			}
-		}
-		if len(completed) == len(applyIDs) {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	states := make(map[int64]string, len(applyIDs))
-	for _, applyID := range applyIDs {
-		apply, err := stor.Applies().Get(t.Context(), applyID)
-		require.NoError(t, err)
-		if apply != nil {
-			states[applyID] = apply.State
-		}
-	}
-	require.Failf(t, "timeout", "scheduler did not complete all applies within %s; states: %v", timeout, states)
+			return fmt.Sprintf("scheduler did not complete all applies within %s; states: %v", timeout, states)
+		},
+	)
 }
 
 func TestScheduler_DatabaseExclusionScopedByEnvironment(t *testing.T) {

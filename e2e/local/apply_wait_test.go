@@ -5,6 +5,7 @@ package local
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -47,51 +48,33 @@ func fetchApplyState(endpoint, applyID string) (string, error) {
 func waitForApplyState(t *testing.T, endpoint, applyID, expectedState string, timeout time.Duration) {
 	t.Helper()
 	expected := strings.ToLower(expectedState)
-	deadline := time.Now().Add(timeout)
 	var lastState, lastError string
 	start := time.Now()
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(t.Context(), testutil.ProgressTimeout)
-		result, err := client.GetProgressCtx(ctx, endpoint, applyID)
-		cancel()
-		if err == nil {
+	testutil.Poll(t, timeout, 300*time.Millisecond,
+		func() bool {
+			ctx, cancel := context.WithTimeout(t.Context(), testutil.ProgressTimeout)
+			result, err := client.GetProgressCtx(ctx, endpoint, applyID)
+			cancel()
+			if err != nil {
+				t.Logf("waitForApplyState: %s poll error: %v (elapsed=%s)", applyID, err, time.Since(start))
+				return false
+			}
 			newState := state.NormalizeState(result.State)
 			if newState != lastState {
 				t.Logf("waitForApplyState: %s state=%s (elapsed=%s)", applyID, newState, time.Since(start))
 			}
 			lastState = newState
 			lastError = result.ErrorMessage
-			if lastState == expected {
-				return
-			}
-		} else {
-			t.Logf("waitForApplyState: %s poll error: %v (elapsed=%s)", applyID, err, time.Since(start))
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for apply %s state %q after %s, last API state: %q, error: %q", applyID, expectedState, time.Since(start), lastState, lastError)
+			return lastState == expected
+		},
+		func() string {
+			return fmt.Sprintf("timeout waiting for apply %s state %q after %s, last API state: %q, error: %q",
+				applyID, expectedState, time.Since(start), lastState, lastError)
+		},
+	)
 }
 
 func waitForApplyAnyState(t *testing.T, endpoint, applyID string, expectedStates []string, timeout time.Duration) string {
 	t.Helper()
-	expected := make([]string, len(expectedStates))
-	for i, s := range expectedStates {
-		expected[i] = strings.ToLower(s)
-	}
-	deadline := time.Now().Add(timeout)
-	var lastState string
-	for time.Now().Before(deadline) {
-		s, err := fetchApplyState(endpoint, applyID)
-		if err == nil {
-			lastState = s
-			for i, exp := range expected {
-				if s == exp {
-					return expectedStates[i]
-				}
-			}
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	require.Failf(t, "timeout", "timeout waiting for apply %s any of states %v, last API state: %q", applyID, expectedStates, lastState)
-	return ""
+	return testutil.WaitForAnyState(t, endpoint, applyID, expectedStates, timeout)
 }
