@@ -1,8 +1,6 @@
 package webhook
 
 import (
-	"time"
-
 	"github.com/block/schemabot/pkg/webhook/templates"
 )
 
@@ -11,7 +9,10 @@ import (
 //
 // Centralized so handlers cannot accidentally omit Timestamp, which previously
 // caused the comment footer to render as "Requested by @<user> at  UTC"
-// (empty timestamp). See block/schemabot#163.
+// (empty timestamp).
+//
+// Uses templates.NowFunc so previews and tests can substitute a deterministic
+// clock — the same hook used by templates that already render UTC timestamps.
 //
 // Specialized error templates (RenderDatabaseNotFound, RenderInvalidConfig,
 // RenderNoConfig, RenderMultipleConfigs, RenderReviewRequired,
@@ -24,7 +25,7 @@ func (h *Handler) postCommandError(
 ) {
 	h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 		RequestedBy: requestedBy,
-		Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
+		Timestamp:   templates.NowFunc().UTC().Format("2006-01-02 15:04:05"),
 		Environment: environment,
 		CommandName: commandName,
 		ErrorDetail: errorDetail,
