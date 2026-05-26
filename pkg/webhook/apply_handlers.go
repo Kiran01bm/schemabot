@@ -63,6 +63,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		h.logger.Error("failed to fetch PR for checks gate", "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Apply,
 			ErrorDetail: "Failed to fetch PR info: " + err.Error(),
@@ -90,6 +91,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		h.logger.Error("failed to check lock", "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Apply,
 			ErrorDetail: "Failed to check lock status: " + err.Error(),
@@ -164,6 +166,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		h.logger.Error("plan execution failed", "repo", repo, "pr", pr, "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Apply,
 			ErrorDetail: err.Error(),
@@ -201,6 +204,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		h.logger.Error("failed to acquire lock", "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Apply,
 			ErrorDetail: "Failed to acquire lock: " + err.Error(),
@@ -233,6 +237,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 				"repo", repo, "pr", pr, "database", database, "error", prErr)
 			h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 				RequestedBy: requestedBy,
+				Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 				Environment: environment,
 				CommandName: action.Apply,
 				ErrorDetail: "Failed to verify PR HEAD before auto-confirm: " + prErr.Error(),
@@ -329,6 +334,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 			"repo", repo, "pr", pr, "database", database, "error", prErr)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Apply,
 			ErrorDetail: "Failed to verify PR HEAD before posting plan: " + prErr.Error(),
@@ -400,6 +406,7 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 		h.logger.Error("failed to fetch PR for checks gate", "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.ApplyConfirm,
 			ErrorDetail: "Failed to fetch PR info: " + err.Error(),
@@ -441,6 +448,7 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 		h.logger.Error("failed to check lock", "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.ApplyConfirm,
 			ErrorDetail: "Failed to check lock status: " + err.Error(),
@@ -493,6 +501,7 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 			"pending_plan_id", existingLock.PendingPlanID, "error", planLoadErr)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.ApplyConfirm,
 			ErrorDetail: "Failed to load confirmation plan: " + planLoadErr.Error(),
@@ -545,6 +554,7 @@ func (h *Handler) executeApply(
 		h.logger.Error("plan execution failed on confirm", "repo", repo, "pr", pr, "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Apply,
 			ErrorDetail: err.Error(),
@@ -665,6 +675,7 @@ func (h *Handler) executeApply(
 		h.logger.Error("apply execution failed", "repo", repo, "pr", pr, "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Apply,
 			ErrorDetail: "Failed to execute apply: " + err.Error(),
@@ -677,6 +688,7 @@ func (h *Handler) executeApply(
 		h.logger.Info("apply rejected by engine", "repo", repo, "pr", pr, "database", database, "environment", environment, "error", applyResp.ErrorMessage)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Apply,
 			ErrorDetail: "Apply was not accepted: " + applyResp.ErrorMessage,
@@ -895,6 +907,7 @@ func (h *Handler) handleUnlockCommand(repo string, pr int, installationID int64,
 		h.logger.Error("failed to look up locks", "repo", repo, "pr", pr, "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			CommandName: action.Unlock,
 			ErrorDetail: "Failed to look up locks: " + err.Error(),
 		}))

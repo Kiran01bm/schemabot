@@ -37,6 +37,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 		h.logger.Error("failed to look up apply", "applyID", applyID, "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			CommandName: action.Rollback,
 			ErrorDetail: "Failed to look up apply: " + err.Error(),
 		}))
@@ -66,6 +67,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 		h.logger.Error("failed to check lock", "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Rollback,
 			ErrorDetail: "Failed to check lock status: " + err.Error(),
@@ -93,6 +95,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 		h.logger.Error("rollback plan failed", "repo", repo, "pr", pr, "applyID", applyID, "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Rollback,
 			ErrorDetail: errMsg,
@@ -118,6 +121,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 		h.logger.Error("failed to acquire lock", "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.Rollback,
 			ErrorDetail: "Failed to acquire lock: " + err.Error(),
@@ -185,6 +189,7 @@ func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment,
 		h.logger.Error("failed to check lock", "error", err)
 		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
 			RequestedBy: requestedBy,
+			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 			Environment: environment,
 			CommandName: action.RollbackConfirm,
 			ErrorDetail: "Failed to check lock status: " + err.Error(),
