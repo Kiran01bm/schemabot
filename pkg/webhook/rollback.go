@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/block/schemabot/pkg/api"
 	"github.com/block/schemabot/pkg/state"
@@ -35,12 +34,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 	apply, err := h.service.Storage().Applies().GetByApplyIdentifier(ctx, applyID)
 	if err != nil {
 		h.logger.Error("failed to look up apply", "applyID", applyID, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			CommandName: action.Rollback,
-			ErrorDetail: "Failed to look up apply: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Rollback, "", requestedBy, "Failed to look up apply: "+err.Error())
 		return
 	}
 	if apply == nil {
@@ -65,13 +59,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 	existingLock, err := h.service.Storage().Locks().Get(ctx, database, dbType)
 	if err != nil {
 		h.logger.Error("failed to check lock", "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Rollback,
-			ErrorDetail: "Failed to check lock status: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Rollback, environment, requestedBy, "Failed to check lock status: "+err.Error())
 		return
 	}
 
@@ -93,13 +81,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 			return
 		}
 		h.logger.Error("rollback plan failed", "repo", repo, "pr", pr, "applyID", applyID, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Rollback,
-			ErrorDetail: errMsg,
-		}))
+		h.postCommandError(repo, pr, installationID, action.Rollback, environment, requestedBy, errMsg)
 		return
 	}
 
@@ -119,13 +101,7 @@ func (h *Handler) handleRollbackCommand(repo string, pr int, installationID int6
 	}
 	if err := h.service.Storage().Locks().Acquire(ctx, lock); err != nil {
 		h.logger.Error("failed to acquire lock", "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Rollback,
-			ErrorDetail: "Failed to acquire lock: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Rollback, environment, requestedBy, "Failed to acquire lock: "+err.Error())
 		return
 	}
 
@@ -187,13 +163,7 @@ func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment,
 	existingLock, err := h.service.Storage().Locks().Get(ctx, database, dbType)
 	if err != nil {
 		h.logger.Error("failed to check lock", "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.RollbackConfirm,
-			ErrorDetail: "Failed to check lock status: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.RollbackConfirm, environment, requestedBy, "Failed to check lock status: "+err.Error())
 		return
 	}
 	if existingLock == nil {
@@ -210,13 +180,7 @@ func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment,
 	planResp, err := h.service.ExecuteRollbackPlan(ctx, database, environment, "")
 	if err != nil {
 		h.logger.Error("rollback plan failed on confirm", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.RollbackConfirm,
-			ErrorDetail: err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.RollbackConfirm, environment, requestedBy, err.Error())
 		return
 	}
 
@@ -248,13 +212,7 @@ func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment,
 	applyResp, applyID, err := h.service.ExecuteApply(ctx, applyReq)
 	if err != nil {
 		h.logger.Error("rollback apply failed", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.RollbackConfirm,
-			ErrorDetail: "Failed to execute rollback: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.RollbackConfirm, environment, requestedBy, "Failed to execute rollback: "+err.Error())
 		return
 	}
 
@@ -272,13 +230,7 @@ func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment,
 		h.logger.Error("accepted rollback did not return an apply id",
 			"repo", repo, "pr", pr, "database", database,
 			"database_type", dbType, "environment", environment)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.RollbackConfirm,
-			ErrorDetail: "Rollback was accepted, but SchemaBot did not receive a stored apply ID. SchemaBot cannot safely track progress or update required status checks. An operator must reconcile the apply state before retrying.",
-		}))
+		h.postCommandError(repo, pr, installationID, action.RollbackConfirm, environment, requestedBy, "Rollback was accepted, but SchemaBot did not receive a stored apply ID. SchemaBot cannot safely track progress or update required status checks. An operator must reconcile the apply state before retrying.")
 		return
 	}
 
@@ -302,13 +254,7 @@ func (h *Handler) handleRollbackConfirmCommand(repo string, pr int, environment,
 			"repo", repo, "pr", pr, "database", database,
 			"database_type", dbType, "environment", environment,
 			"apply_id", applyID, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.RollbackConfirm,
-			ErrorDetail: "Rollback was accepted, but SchemaBot could not update the required status check: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.RollbackConfirm, environment, requestedBy, "Rollback was accepted, but SchemaBot could not update the required status check: "+err.Error())
 		return
 	}
 

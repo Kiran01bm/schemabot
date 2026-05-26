@@ -27,13 +27,7 @@ func (h *Handler) handlePlanCommand(w http.ResponseWriter, repo string, pr int, 
 	// Fix checks stuck at "in_progress" from crashed applies
 	if err := h.reconcileStaleChecks(ctx, client, repo, pr); err != nil {
 		h.logger.Error("failed to reconcile stale status checks", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Plan,
-			ErrorDetail: "Failed to reconcile stale status checks: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Plan, environment, requestedBy, "Failed to reconcile stale status checks: "+err.Error())
 		h.writeJSON(w, http.StatusOK, map[string]string{"message": "status check reconciliation failed"})
 		return
 	}
@@ -54,13 +48,7 @@ func (h *Handler) handlePlanCommand(w http.ResponseWriter, repo string, pr int, 
 	freshPRInfo, err := client.FetchPullRequestNoCache(ctx, repo, pr)
 	if err != nil {
 		h.logger.Error("failed to fetch PR for stale-schema check", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Plan,
-			ErrorDetail: "Failed to verify PR HEAD: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Plan, environment, requestedBy, "Failed to verify PR HEAD: "+err.Error())
 		h.writeJSON(w, http.StatusOK, map[string]string{"message": "PR fetch failed"})
 		return
 	}
@@ -91,13 +79,7 @@ func (h *Handler) handlePlanCommand(w http.ResponseWriter, repo string, pr int, 
 		h.postFailingAggregates(ctx, client, repo, pr, schemaResult.HeadSHA, map[string]string{
 			environment: userFacingError(err),
 		})
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Plan,
-			ErrorDetail: err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Plan, environment, requestedBy, err.Error())
 		h.writeJSON(w, http.StatusOK, map[string]string{"message": "plan failed"})
 		return
 	}
@@ -138,12 +120,7 @@ func (h *Handler) handleMultiEnvPlan(repo string, pr int, databaseName string, i
 	// Fix checks stuck at "in_progress" from crashed applies
 	if err := h.reconcileStaleChecks(ctx, client, repo, pr); err != nil {
 		h.logger.Error("failed to reconcile stale status checks", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			CommandName: action.Plan,
-			ErrorDetail: "Failed to reconcile stale status checks: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Plan, "", requestedBy, "Failed to reconcile stale status checks: "+err.Error())
 		return
 	}
 
@@ -245,12 +222,7 @@ func (h *Handler) handleMultiEnvPlan(repo string, pr int, databaseName string, i
 				if prErr != nil {
 					h.logger.Error("failed to fetch PR for stale-schema check",
 						"repo", repo, "pr", pr, "error", prErr)
-					h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-						RequestedBy: requestedBy,
-						Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-						CommandName: action.Plan,
-						ErrorDetail: "Failed to verify PR HEAD: " + prErr.Error(),
-					}))
+					h.postCommandError(repo, pr, installationID, action.Plan, "", requestedBy, "Failed to verify PR HEAD: "+prErr.Error())
 					return
 				}
 				if rejected := h.assertSchemaStillCurrent(ctx, repo, pr, installationID, schemaResult, freshPRInfo.HeadSHA, env, requestedBy, action.Plan); rejected {

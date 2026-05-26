@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/hmarr/codeowners"
 
@@ -26,13 +25,7 @@ func (h *Handler) enforceReviewGate(ctx context.Context, client *ghclient.Instal
 	gateResult, err := h.checkReviewGate(ctx, client, repo, pr, schemaResult.SchemaPath)
 	if err != nil {
 		h.logger.Error("review gate check failed", "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: commandName,
-			ErrorDetail: reviewGateErrorDetail(err),
-		}))
+		h.postCommandError(repo, pr, installationID, commandName, environment, requestedBy, reviewGateErrorDetail(err))
 		return true
 	}
 	if gateResult != nil && !gateResult.Approved {

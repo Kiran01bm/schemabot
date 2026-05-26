@@ -41,13 +41,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 	// is authorized to run apply for this database.
 	if err := h.reconcileStaleChecks(ctx, client, repo, pr); err != nil {
 		h.logger.Error("failed to reconcile stale status checks", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: "Failed to reconcile stale status checks: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Failed to reconcile stale status checks: "+err.Error())
 		return
 	}
 
@@ -61,13 +55,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 	prInfo, err := client.FetchPullRequest(ctx, repo, pr)
 	if err != nil {
 		h.logger.Error("failed to fetch PR for checks gate", "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: "Failed to fetch PR info: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Failed to fetch PR info: "+err.Error())
 		return
 	}
 	if blocked := h.enforcePassingChecks(ctx, client, repo, pr, installationID, prInfo.HeadSHA, environment); blocked {
@@ -89,13 +77,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 	existingLock, err := h.service.Storage().Locks().Get(ctx, database, dbType)
 	if err != nil {
 		h.logger.Error("failed to check lock", "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: "Failed to check lock status: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Failed to check lock status: "+err.Error())
 		return
 	}
 
@@ -164,13 +146,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 	planResp, err := h.service.ExecutePlan(ctx, planReq)
 	if err != nil {
 		h.logger.Error("plan execution failed", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, err.Error())
 		return
 	}
 
@@ -202,13 +178,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 	}
 	if err := h.service.Storage().Locks().Acquire(ctx, lock); err != nil {
 		h.logger.Error("failed to acquire lock", "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: "Failed to acquire lock: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Failed to acquire lock: "+err.Error())
 		return
 	}
 
@@ -235,13 +205,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 		if prErr != nil {
 			h.logger.Error("failed to fetch PR for stale-schema check, releasing lock",
 				"repo", repo, "pr", pr, "database", database, "error", prErr)
-			h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-				RequestedBy: requestedBy,
-				Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-				Environment: environment,
-				CommandName: action.Apply,
-				ErrorDetail: "Failed to verify PR HEAD before auto-confirm: " + prErr.Error(),
-			}))
+			h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Failed to verify PR HEAD before auto-confirm: "+prErr.Error())
 			relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
 			if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
 				h.logger.Error("failed to release lock after PR fetch failure",
@@ -332,13 +296,7 @@ func (h *Handler) handleApplyCommand(repo string, pr int, environment, databaseN
 	if prErr != nil {
 		h.logger.Error("failed to fetch PR for stale-schema check, releasing lock",
 			"repo", repo, "pr", pr, "database", database, "error", prErr)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: "Failed to verify PR HEAD before posting plan: " + prErr.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Failed to verify PR HEAD before posting plan: "+prErr.Error())
 		relErr := h.service.Storage().Locks().Release(ctx, database, dbType, lockOwner)
 		if relErr != nil && !errors.Is(relErr, storage.ErrLockNotFound) && !errors.Is(relErr, storage.ErrLockNotOwned) {
 			h.logger.Error("failed to release lock after PR fetch failure",
@@ -404,13 +362,7 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 	confirmPRInfo, err := client.FetchPullRequestNoCache(ctx, repo, pr)
 	if err != nil {
 		h.logger.Error("failed to fetch PR for checks gate", "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.ApplyConfirm,
-			ErrorDetail: "Failed to fetch PR info: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.ApplyConfirm, environment, requestedBy, "Failed to fetch PR info: "+err.Error())
 		return
 	}
 
@@ -446,13 +398,7 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 	existingLock, err := h.service.Storage().Locks().Get(ctx, database, dbType)
 	if err != nil {
 		h.logger.Error("failed to check lock", "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.ApplyConfirm,
-			ErrorDetail: "Failed to check lock status: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.ApplyConfirm, environment, requestedBy, "Failed to check lock status: "+err.Error())
 		return
 	}
 	if existingLock == nil {
@@ -499,13 +445,7 @@ func (h *Handler) handleApplyConfirmCommand(repo string, pr int, environment, da
 		h.logger.Error("failed to load confirmation plan for cross-delivery freshness check",
 			"repo", repo, "pr", pr, "database", database, "database_type", dbType, "environment", environment,
 			"pending_plan_id", existingLock.PendingPlanID, "error", planLoadErr)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.ApplyConfirm,
-			ErrorDetail: "Failed to load confirmation plan: " + planLoadErr.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.ApplyConfirm, environment, requestedBy, "Failed to load confirmation plan: "+planLoadErr.Error())
 		return
 	}
 	if rejected := h.assertPlanStillCurrent(ctx, repo, pr, installationID, storedPlan, confirmPRInfo.HeadSHA, environment, requestedBy); rejected {
@@ -552,13 +492,7 @@ func (h *Handler) executeApply(
 	planResp, err := h.service.ExecutePlan(ctx, planReq)
 	if err != nil {
 		h.logger.Error("plan execution failed on confirm", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, err.Error())
 		return
 	}
 
@@ -673,26 +607,14 @@ func (h *Handler) executeApply(
 	if err != nil {
 		h.service.SetPendingObserver(database, "", environment, nil)
 		h.logger.Error("apply execution failed", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: "Failed to execute apply: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Failed to execute apply: "+err.Error())
 		return
 	}
 
 	if !applyResp.Accepted {
 		h.service.SetPendingObserver(database, "", environment, nil)
 		h.logger.Info("apply rejected by engine", "repo", repo, "pr", pr, "database", database, "environment", environment, "error", applyResp.ErrorMessage)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: "Apply was not accepted: " + applyResp.ErrorMessage,
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Apply was not accepted: "+applyResp.ErrorMessage)
 		return
 	}
 
@@ -703,13 +625,7 @@ func (h *Handler) executeApply(
 		h.logger.Error("accepted apply did not return an apply id",
 			"repo", repo, "pr", pr, "database", database,
 			"database_type", schemaResult.Type, "environment", environment)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: "Apply was accepted, but SchemaBot did not receive a stored apply ID. SchemaBot cannot safely track progress or update required status checks. An operator must reconcile the apply state before retrying.",
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Apply was accepted, but SchemaBot did not receive a stored apply ID. SchemaBot cannot safely track progress or update required status checks. An operator must reconcile the apply state before retrying.")
 		return
 	}
 
@@ -749,13 +665,7 @@ func (h *Handler) executeApply(
 			"repo", repo, "pr", pr, "database", database,
 			"database_type", schemaResult.Type, "environment", environment,
 			"apply_id", applyID, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			Environment: environment,
-			CommandName: action.Apply,
-			ErrorDetail: "Apply was accepted, but SchemaBot could not update the required status check: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Apply, environment, requestedBy, "Apply was accepted, but SchemaBot could not update the required status check: "+err.Error())
 		return
 	}
 }
@@ -905,12 +815,7 @@ func (h *Handler) handleUnlockCommand(repo string, pr int, installationID int64,
 	locks, err := h.service.Storage().Locks().GetByPR(ctx, repo, pr)
 	if err != nil {
 		h.logger.Error("failed to look up locks", "repo", repo, "pr", pr, "error", err)
-		h.postComment(repo, pr, installationID, templates.RenderGenericError(templates.SchemaErrorData{
-			RequestedBy: requestedBy,
-			Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-			CommandName: action.Unlock,
-			ErrorDetail: "Failed to look up locks: " + err.Error(),
-		}))
+		h.postCommandError(repo, pr, installationID, action.Unlock, "", requestedBy, "Failed to look up locks: "+err.Error())
 		return
 	}
 
