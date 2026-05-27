@@ -10,13 +10,13 @@ import (
 )
 
 func TestStateLabel_PlanetScalePhases(t *testing.T) {
-	assert.Equal(t, "Preparing branch", StateLabel(state.Apply.PreparingBranch))
-	assert.Equal(t, "Applying changes to branch", StateLabel(state.Apply.ApplyingBranchChanges))
-	assert.Equal(t, "Validating branch", StateLabel(state.Apply.ValidatingBranch))
-	assert.Equal(t, "Creating deploy request", StateLabel(state.Apply.CreatingDeployRequest))
-	assert.Equal(t, "Validating deploy request", StateLabel(state.Apply.ValidatingDeployRequest))
-	assert.Equal(t, "Cancelled", StateLabel(state.Apply.Cancelled))
-	assert.Equal(t, "Retrying", StateLabel(state.Apply.FailedRetryable))
+	assert.Equal(t, "Preparing branch", state.Label(state.Apply.PreparingBranch))
+	assert.Equal(t, "Applying changes to branch", state.Label(state.Apply.ApplyingBranchChanges))
+	assert.Equal(t, "Validating branch", state.Label(state.Apply.ValidatingBranch))
+	assert.Equal(t, "Creating deploy request", state.Label(state.Apply.CreatingDeployRequest))
+	assert.Equal(t, "Validating deploy request", state.Label(state.Apply.ValidatingDeployRequest))
+	assert.Equal(t, "Cancelled", state.Label(state.Apply.Cancelled))
+	assert.Equal(t, "Retrying", state.Label(state.Apply.FailedRetryable))
 }
 
 func TestFormatProgressState_PlanetScalePhases(t *testing.T) {

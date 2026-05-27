@@ -175,12 +175,8 @@ func IsState(s string, expected ...string) bool {
 // where no further processing will occur. FailedRetryable is not terminal;
 // scheduler workers may claim and retry it.
 func IsTerminalApplyState(s string) bool {
-	switch s {
-	case Apply.Completed, Apply.Failed, Apply.Stopped, Apply.Cancelled, Apply.Reverted:
-		return true
-	default:
-		return false
-	}
+	info, ok := LookupApply(s)
+	return ok && info.Terminal
 }
 
 // IsBranchSetupPhase returns true if the apply state is a PlanetScale branch
@@ -188,7 +184,8 @@ func IsTerminalApplyState(s string) bool {
 // are Queued). Used by the TUI and CLI to hide the table list during setup.
 // WaitingForDeploy is included because the deploy hasn't started yet.
 func IsBranchSetupPhase(s string) bool {
-	return IsState(s, Apply.Pending, Apply.PreparingBranch, Apply.ApplyingBranchChanges, Apply.ValidatingBranch, Apply.CreatingDeployRequest, Apply.ValidatingDeployRequest, Apply.WaitingForDeploy)
+	info, ok := LookupApply(NormalizeState(s))
+	return ok && info.BranchSetup
 }
 
 // IsPlanetScaleEngine returns true if the engine string indicates PlanetScale/Vitess.

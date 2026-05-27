@@ -60,7 +60,7 @@ func WriteProgress(data ProgressData) {
 	}
 
 	// Build key/value pairs for the detail box
-	displayState := StateLabel(data.State)
+	displayState := state.Label(data.State)
 	if state.IsState(data.State, state.Apply.PreparingBranch) && data.Metadata != nil && data.Metadata["existing_branch"] != "" {
 		displayState = "Refreshing branch schema"
 	}
@@ -740,7 +740,7 @@ func WriteStatusList(data StatusListData) {
 		maxID = maxLen(maxID, len(a.ApplyID))
 		maxDB = maxLen(maxDB, len(a.Database))
 		maxEnv = maxLen(maxEnv, len(a.Environment))
-		maxState = maxLen(maxState, len(StateLabel(a.State)))
+		maxState = maxLen(maxState, len(state.Label(a.State)))
 		maxStarted = maxLen(maxStarted, len(formatStartedAt(a.StartedAt)))
 		maxDur = maxLen(maxDur, len(formatApplyDuration(a.StartedAt, a.CompletedAt)))
 	}
@@ -759,7 +759,7 @@ func WriteStatusList(data StatusListData) {
 
 	// Table rows
 	for _, a := range data.Applies {
-		label := StateLabel(a.State)
+		label := state.Label(a.State)
 		colorFn := stateColorFunc(a.State)
 		padded := fmt.Sprintf("%-*s", maxState, label)
 		coloredState := padded
@@ -831,7 +831,7 @@ func WriteDatabaseHistory(data DatabaseHistoryData) {
 	for _, a := range data.Applies {
 		maxID = maxLen(maxID, len(a.ApplyID))
 		maxEnv = maxLen(maxEnv, len(a.Environment))
-		maxState = maxLen(maxState, len(StateLabel(a.State)))
+		maxState = maxLen(maxState, len(state.Label(a.State)))
 		maxStarted = maxLen(maxStarted, len(formatStartedAt(a.StartedAt)))
 		maxDur = maxLen(maxDur, len(formatApplyDuration(a.StartedAt, a.CompletedAt)))
 	}
@@ -849,7 +849,7 @@ func WriteDatabaseHistory(data DatabaseHistoryData) {
 
 	// Table rows
 	for _, a := range data.Applies {
-		label := StateLabel(a.State)
+		label := state.Label(a.State)
 		colorFn := stateColorFunc(a.State)
 		padded := fmt.Sprintf("%-*s", maxState, label)
 		coloredState := padded
@@ -868,48 +868,6 @@ func WriteDatabaseHistory(data DatabaseHistoryData) {
 
 	fmt.Println()
 	fmt.Printf("%sUse 'schemabot status <apply_id>' to view details%s\n", ANSIDim, ANSIReset)
-}
-
-// StateLabel returns the human-readable display label for an apply state.
-func StateLabel(s string) string {
-	switch s {
-	case state.Apply.Completed:
-		return "Completed"
-	case state.Apply.Failed:
-		return "Failed"
-	case state.Apply.FailedRetryable:
-		return "Retrying"
-	case state.Apply.Running:
-		return "Running"
-	case state.Apply.WaitingForDeploy:
-		return "Waiting for deploy"
-	case state.Apply.WaitingForCutover:
-		return "Waiting for cutover"
-	case state.Apply.CuttingOver:
-		return "Cutting over"
-	case state.Apply.Stopped:
-		return "Stopped"
-	case state.Apply.Pending:
-		return "Pending"
-	case state.Apply.Cancelled:
-		return "Cancelled"
-	case state.Apply.PreparingBranch:
-		return "Preparing branch"
-	case state.Apply.ApplyingBranchChanges:
-		return "Applying changes to branch"
-	case state.Apply.ValidatingBranch:
-		return "Validating branch"
-	case state.Apply.CreatingDeployRequest:
-		return "Creating deploy request"
-	case state.Apply.ValidatingDeployRequest:
-		return "Validating deploy request"
-	case state.Apply.RevertWindow:
-		return "Revert window"
-	case state.Apply.Reverted:
-		return "Reverted"
-	default:
-		return s
-	}
 }
 
 // stateColorFunc returns an ANSI color function for the given state.
