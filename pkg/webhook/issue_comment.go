@@ -183,7 +183,7 @@ func (h *Handler) handleIssueComment(w http.ResponseWriter, body []byte) {
 	}
 
 	// Reject -y/--yes on commands that don't support it
-	if result.Action != action.Apply && parser.autoConfirmRegex.MatchString(payload.Comment.Body) {
+	if result.Action != action.Apply && parser.HasAutoConfirmFlag(payload.Comment.Body) {
 		h.postComment(repo, pr, installationID, templates.RenderUnsupportedAutoConfirm(result.Action))
 		h.writeJSON(w, http.StatusOK, map[string]string{"message": "unsupported flag"})
 		return

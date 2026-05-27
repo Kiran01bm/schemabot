@@ -2,42 +2,122 @@ package webhook
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/block/schemabot/pkg/webhook/action"
 )
 
+// CommandSpec declares the parse and dispatch shape of a SchemaBot command.
+//
+// Adding a new command means appending one entry to commandSpecs — the parser
+// regex, flag handling, and missing-env behavior all derive from the spec.
+// Adding ad-hoc parsing logic anywhere else for a known command is a sign the
+// spec is missing a field, not that the parser needs another special case.
+type CommandSpec struct {
+	// Name is the command word that follows "schemabot ", e.g. "plan".
+	Name string
+
+	// RequiresEnv means the command needs `-e <env>` to be runnable.
+	// When env is missing the parser returns MissingEnv=true; the dispatcher
+	// decides whether to post a "missing env" comment or take a multi-env
+	// branch (currently only plan does the latter).
+	RequiresEnv bool
+
+	// HasApplyID means the command takes a positional `apply_<id>` argument
+	// (currently only rollback).
+	HasApplyID bool
+
+	// SupportsDB means `-d <db>` is recognized.
+	SupportsDB bool
+
+	// SupportsAutoConfirm means `-y` / `--yes` is recognized. Only apply uses
+	// this today; other commands have the flag silently dropped from the
+	// CommandResult so the dispatcher can post an "unsupported flag" comment
+	// via HasAutoConfirmFlag.
+	SupportsAutoConfirm bool
+
+	// SupportsSkipRevert means `--skip-revert` is recognized.
+	SupportsSkipRevert bool
+
+	// SupportsDeferCutover means `--defer-cutover` is recognized.
+	SupportsDeferCutover bool
+
+	// SupportsAllowUnsafe means `--allow-unsafe` is recognized.
+	SupportsAllowUnsafe bool
+}
+
+// commandSpecs is the registry of all SchemaBot commands. Order does not
+// affect parsing — the parser builds an alternation regex sorted by command
+// name length so longer names (e.g. "apply-confirm") match before shorter
+// prefixes ("apply").
+var commandSpecs = []CommandSpec{
+	{Name: action.Help},
+	{Name: action.Plan, RequiresEnv: true, SupportsDB: true},
+	{Name: action.Apply, RequiresEnv: true, SupportsDB: true,
+		SupportsSkipRevert: true, SupportsDeferCutover: true,
+		SupportsAllowUnsafe: true, SupportsAutoConfirm: true},
+	{Name: action.ApplyConfirm, RequiresEnv: true, SupportsDB: true,
+		SupportsSkipRevert: true, SupportsDeferCutover: true, SupportsAllowUnsafe: true},
+	{Name: action.Unlock},
+	{Name: action.FixLint, SupportsDB: true},
+	{Name: action.Stop, RequiresEnv: true},
+	{Name: action.Revert, RequiresEnv: true},
+	{Name: action.SkipRevert, RequiresEnv: true},
+	{Name: action.Cutover, RequiresEnv: true},
+	{Name: action.Rollback, RequiresEnv: true, HasApplyID: true, SupportsDB: true,
+		SupportsDeferCutover: true},
+	{Name: action.RollbackConfirm, RequiresEnv: true, SupportsDB: true},
+}
+
+// specByName indexes commandSpecs for O(1) lookup by command word.
+var specByName = func() map[string]CommandSpec {
+	m := make(map[string]CommandSpec, len(commandSpecs))
+	for _, s := range commandSpecs {
+		m[s.Name] = s
+	}
+	return m
+}()
+
+// commandNamePattern is the alternation of every registered command name,
+// sorted by length descending so "apply-confirm" wins over "apply" at the same
+// start position under RE2's leftmost-first semantics.
+func commandNamePattern() string {
+	names := make([]string, 0, len(commandSpecs))
+	for _, s := range commandSpecs {
+		names = append(names, regexp.QuoteMeta(s.Name))
+	}
+	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
+	return strings.Join(names, "|")
+}
+
 // CommandParser parses SchemaBot commands from PR comments.
 type CommandParser struct {
-	commandRegex           *regexp.Regexp
-	mentionRegex           *regexp.Regexp
-	helpRegex              *regexp.Regexp
-	commandWithoutEnvRegex *regexp.Regexp
-	rollbackCommandRegex   *regexp.Regexp
-	rollbackRegex          *regexp.Regexp // rollback <apply-id>
-	environmentRegex       *regexp.Regexp // -e <env>
-	databaseRegex          *regexp.Regexp
-	skipRevertRegex        *regexp.Regexp
-	deferCutoverRegex      *regexp.Regexp
-	allowUnsafeRegex       *regexp.Regexp
-	autoConfirmRegex       *regexp.Regexp
+	commandRegex      *regexp.Regexp
+	mentionRegex      *regexp.Regexp
+	helpRegex         *regexp.Regexp
+	applyIDRegex      *regexp.Regexp
+	environmentRegex  *regexp.Regexp
+	databaseRegex     *regexp.Regexp
+	skipRevertRegex   *regexp.Regexp
+	deferCutoverRegex *regexp.Regexp
+	allowUnsafeRegex  *regexp.Regexp
+	autoConfirmRegex  *regexp.Regexp
 }
 
 // NewCommandParser creates a new command parser.
 func NewCommandParser() *CommandParser {
 	return &CommandParser{
-		commandRegex:           regexp.MustCompile(`(?i)schemabot\s+(plan|apply|apply-confirm|unlock|stop|revert|skip-revert|cutover|rollback-confirm)\s+(?:.*?-e\s+(staging|production))`),
-		mentionRegex:           regexp.MustCompile(`(?i)\bschemabot\b`),
-		helpRegex:              regexp.MustCompile(`(?i)schemabot\s+help\b`),
-		commandWithoutEnvRegex: regexp.MustCompile(`(?i)schemabot\s+(plan|apply|apply-confirm|unlock|stop|revert|skip-revert|cutover|rollback|rollback-confirm|fix-lint)\b`),
-		rollbackCommandRegex:   regexp.MustCompile(`(?i)schemabot\s+rollback(?:\s|$)`),
-		rollbackRegex:          regexp.MustCompile(`(?i)schemabot\s+rollback\s+(apply[_-][a-f0-9]+)`),
-		environmentRegex:       regexp.MustCompile(`(?i)-e\s+(staging|production)`),
-		databaseRegex:          regexp.MustCompile(`(?i)-d\s+([a-zA-Z0-9_-]+)`),
-		skipRevertRegex:        regexp.MustCompile(`(?i)--skip-revert\b`),
-		deferCutoverRegex:      regexp.MustCompile(`(?i)--defer-cutover\b`),
-		allowUnsafeRegex:       regexp.MustCompile(`(?i)--allow-unsafe\b`),
-		autoConfirmRegex:       regexp.MustCompile(`(?i)(?:--yes\b|-y\b)`),
+		commandRegex:      regexp.MustCompile(`(?i)schemabot\s+(` + commandNamePattern() + `)\b`),
+		mentionRegex:      regexp.MustCompile(`(?i)\bschemabot\b`),
+		helpRegex:         regexp.MustCompile(`(?i)schemabot\s+help\b`),
+		applyIDRegex:      regexp.MustCompile(`(?i)\b(apply[_-][a-f0-9]+)\b`),
+		environmentRegex:  regexp.MustCompile(`(?i)-e\s+(staging|production)`),
+		databaseRegex:     regexp.MustCompile(`(?i)-d\s+([a-zA-Z0-9_-]+)`),
+		skipRevertRegex:   regexp.MustCompile(`(?i)--skip-revert\b`),
+		deferCutoverRegex: regexp.MustCompile(`(?i)--defer-cutover\b`),
+		allowUnsafeRegex:  regexp.MustCompile(`(?i)--allow-unsafe\b`),
+		autoConfirmRegex:  regexp.MustCompile(`(?i)(?:--yes\b|-y\b)`),
 	}
 }
 
@@ -58,108 +138,89 @@ type CommandResult struct {
 }
 
 // ParseCommand parses a SchemaBot command from a comment body.
+//
+// Resolution order:
+//  1. Help (`schemabot help`) is detected first and short-circuits with
+//     IsHelp=true so the dispatcher can branch on it without consulting the
+//     full spec table.
+//  2. The first registered command word that follows `schemabot ` is looked
+//     up in specByName and routed through applySpec.
+//  3. If `schemabot` appears but no registered command follows, the result is
+//     a bare IsMention so the dispatcher can post a friendly "invalid command"
+//     comment under the respond_to_unscoped policy.
 func (p *CommandParser) ParseCommand(body string) CommandResult {
-	// Check help first
 	if p.helpRegex.MatchString(body) {
 		return CommandResult{Action: action.Help, IsHelp: true, IsMention: true}
 	}
 
-	// Check rollback <apply-id> -e <env>
-	if p.rollbackCommandRegex.MatchString(body) {
-		result := CommandResult{
-			Action:       action.Rollback,
-			IsMention:    true,
-			DeferCutover: p.deferCutoverRegex.MatchString(body),
-		}
-		rollbackMatches := p.rollbackRegex.FindStringSubmatch(body)
-		if len(rollbackMatches) >= 2 {
-			result.ApplyID = rollbackMatches[1]
-		}
-		dbMatches := p.databaseRegex.FindStringSubmatch(body)
-		if len(dbMatches) >= 2 {
-			result.Database = dbMatches[1]
-		}
-		envMatches := p.environmentRegex.FindStringSubmatch(body)
-		if len(envMatches) >= 2 {
-			result.Environment = strings.ToLower(envMatches[1])
-		}
-		if result.Environment != "" {
-			result.Found = true
-		} else {
-			result.MissingEnv = true
-		}
-		return result
-	}
-
-	// Check valid command with environment
 	matches := p.commandRegex.FindStringSubmatch(body)
-	if len(matches) >= 3 {
-		cmd := strings.ToLower(matches[1])
-		result := CommandResult{
-			Action:       cmd,
-			Environment:  strings.ToLower(matches[2]),
-			Found:        true,
-			IsMention:    true,
-			SkipRevert:   p.skipRevertRegex.MatchString(body),
-			DeferCutover: p.deferCutoverRegex.MatchString(body),
-			AllowUnsafe:  p.allowUnsafeRegex.MatchString(body),
-			AutoConfirm:  cmd == action.Apply && p.autoConfirmRegex.MatchString(body),
+	if len(matches) < 2 {
+		if p.mentionRegex.MatchString(body) {
+			return CommandResult{IsMention: true}
 		}
-
-		dbMatches := p.databaseRegex.FindStringSubmatch(body)
-		if len(dbMatches) >= 2 {
-			result.Database = dbMatches[1]
-		}
-
-		return result
+		return CommandResult{}
 	}
 
-	// Check recognized command without -e flag
-	envMatches := p.commandWithoutEnvRegex.FindStringSubmatch(body)
-	if len(envMatches) >= 2 {
-		cmd := strings.ToLower(envMatches[1])
-
-		// unlock and fix-lint don't require -e flag
-		if cmd == action.Unlock || cmd == action.FixLint {
-			result := CommandResult{
-				Action:    cmd,
-				Found:     true,
-				IsMention: true,
-			}
-			if cmd == action.FixLint {
-				dbMatches := p.databaseRegex.FindStringSubmatch(body)
-				if len(dbMatches) >= 2 {
-					result.Database = dbMatches[1]
-				}
-			}
-			return result
-		}
-
-		// plan without -e runs for all configured environments
-		if cmd == action.Plan {
-			result := CommandResult{
-				Action:     cmd,
-				IsMention:  true,
-				MissingEnv: true,
-			}
-			dbMatches := p.databaseRegex.FindStringSubmatch(body)
-			if len(dbMatches) >= 2 {
-				result.Database = dbMatches[1]
-			}
-			return result
-		}
-
-		return CommandResult{
-			Action:     cmd,
-			IsMention:  true,
-			MissingEnv: true,
-		}
-	}
-
-	// Check if schemabot was mentioned at all
-	if p.mentionRegex.MatchString(body) {
+	name := strings.ToLower(matches[1])
+	spec, ok := specByName[name]
+	if !ok {
 		return CommandResult{IsMention: true}
 	}
+	return p.applySpec(spec, body)
+}
 
-	return CommandResult{}
+// applySpec populates CommandResult from a body using the per-command spec.
+// Each spec field gates the corresponding regex extraction, so flags only
+// affect commands that opted in via the registry.
+func (p *CommandParser) applySpec(spec CommandSpec, body string) CommandResult {
+	result := CommandResult{
+		Action:    spec.Name,
+		IsMention: true,
+	}
+
+	if spec.HasApplyID {
+		if m := p.applyIDRegex.FindStringSubmatch(body); len(m) >= 2 {
+			result.ApplyID = m[1]
+		}
+	}
+	if spec.SupportsDB {
+		if m := p.databaseRegex.FindStringSubmatch(body); len(m) >= 2 {
+			result.Database = m[1]
+		}
+	}
+	if spec.SupportsSkipRevert {
+		result.SkipRevert = p.skipRevertRegex.MatchString(body)
+	}
+	if spec.SupportsDeferCutover {
+		result.DeferCutover = p.deferCutoverRegex.MatchString(body)
+	}
+	if spec.SupportsAllowUnsafe {
+		result.AllowUnsafe = p.allowUnsafeRegex.MatchString(body)
+	}
+	if spec.SupportsAutoConfirm {
+		result.AutoConfirm = p.autoConfirmRegex.MatchString(body)
+	}
+
+	if m := p.environmentRegex.FindStringSubmatch(body); len(m) >= 2 {
+		result.Environment = strings.ToLower(m[1])
+	}
+
+	switch {
+	case !spec.RequiresEnv:
+		result.Found = true
+	case result.Environment != "":
+		result.Found = true
+	default:
+		result.MissingEnv = true
+	}
+
+	return result
+}
+
+// HasAutoConfirmFlag reports whether the body contains the `-y` / `--yes`
+// flag, regardless of which command it accompanies. The dispatcher uses this
+// to post an "unsupported flag" comment when an operator pairs `-y` with a
+// command whose spec does not opt into SupportsAutoConfirm.
+func (p *CommandParser) HasAutoConfirmFlag(body string) bool {
+	return p.autoConfirmRegex.MatchString(body)
 }

@@ -3,8 +3,88 @@ package webhook
 import (
 	"testing"
 
+	"github.com/block/schemabot/pkg/webhook/action"
 	"github.com/stretchr/testify/assert"
 )
+
+// TestCommandSpecs_CoverEveryDispatcherAction enforces that every command the
+// dispatcher branches on has a spec in the registry. A spec missing here is
+// the proximate cause of "schemabot $cmd" silently degrading to IsMention.
+func TestCommandSpecs_CoverEveryDispatcherAction(t *testing.T) {
+	required := []string{
+		action.Help,
+		action.Plan,
+		action.Apply,
+		action.ApplyConfirm,
+		action.Unlock,
+		action.FixLint,
+		action.Stop,
+		action.Revert,
+		action.SkipRevert,
+		action.Cutover,
+		action.Rollback,
+		action.RollbackConfirm,
+	}
+	for _, name := range required {
+		_, ok := specByName[name]
+		assert.Truef(t, ok, "commandSpecs is missing %q", name)
+	}
+}
+
+// TestCommandSpecs_FlagsRespected pins which commands opt into which flags.
+// A flag mistakenly enabled here silently broadens command behavior; a flag
+// mistakenly removed silently drops user input. Either change should be a
+// deliberate, reviewable diff.
+func TestCommandSpecs_FlagsRespected(t *testing.T) {
+	cases := []struct {
+		name                string
+		requiresEnv         bool
+		hasApplyID          bool
+		supportsDB          bool
+		supportsAutoConfirm bool
+		supportsSkipRevert  bool
+		supportsDefer       bool
+		supportsAllowUnsafe bool
+	}{
+		{name: action.Help},
+		{name: action.Plan, requiresEnv: true, supportsDB: true},
+		{name: action.Apply, requiresEnv: true, supportsDB: true,
+			supportsAutoConfirm: true, supportsSkipRevert: true,
+			supportsDefer: true, supportsAllowUnsafe: true},
+		{name: action.ApplyConfirm, requiresEnv: true, supportsDB: true,
+			supportsSkipRevert: true, supportsDefer: true, supportsAllowUnsafe: true},
+		{name: action.Unlock},
+		{name: action.FixLint, supportsDB: true},
+		{name: action.Stop, requiresEnv: true},
+		{name: action.Revert, requiresEnv: true},
+		{name: action.SkipRevert, requiresEnv: true},
+		{name: action.Cutover, requiresEnv: true},
+		{name: action.Rollback, requiresEnv: true, hasApplyID: true,
+			supportsDB: true, supportsDefer: true},
+		{name: action.RollbackConfirm, requiresEnv: true, supportsDB: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, ok := specByName[tc.name]
+			assert.True(t, ok)
+			assert.Equal(t, tc.requiresEnv, spec.RequiresEnv, "RequiresEnv")
+			assert.Equal(t, tc.hasApplyID, spec.HasApplyID, "HasApplyID")
+			assert.Equal(t, tc.supportsDB, spec.SupportsDB, "SupportsDB")
+			assert.Equal(t, tc.supportsAutoConfirm, spec.SupportsAutoConfirm, "SupportsAutoConfirm")
+			assert.Equal(t, tc.supportsSkipRevert, spec.SupportsSkipRevert, "SupportsSkipRevert")
+			assert.Equal(t, tc.supportsDefer, spec.SupportsDeferCutover, "SupportsDeferCutover")
+			assert.Equal(t, tc.supportsAllowUnsafe, spec.SupportsAllowUnsafe, "SupportsAllowUnsafe")
+		})
+	}
+}
+
+func TestHasAutoConfirmFlag(t *testing.T) {
+	p := NewCommandParser()
+	assert.True(t, p.HasAutoConfirmFlag("schemabot apply -e staging -y"))
+	assert.True(t, p.HasAutoConfirmFlag("schemabot apply -e staging --yes"))
+	assert.False(t, p.HasAutoConfirmFlag("schemabot apply -e staging"))
+	assert.False(t, p.HasAutoConfirmFlag(""))
+}
 
 func TestParseCommand(t *testing.T) {
 	parser := NewCommandParser()
