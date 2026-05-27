@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/block/schemabot/pkg/apitypes"
-	"github.com/block/schemabot/pkg/cmd/templates"
+	"github.com/block/schemabot/pkg/cmd/internal/templates"
 	"github.com/block/schemabot/pkg/state"
 	"github.com/block/schemabot/pkg/ui"
 )

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/block/schemabot/pkg/cmd/templates"
+	"github.com/block/schemabot/pkg/cmd/internal/templates"
 	"github.com/block/schemabot/pkg/state"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/stretchr/testify/assert"

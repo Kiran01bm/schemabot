@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/block/schemabot/pkg/cmd/client"
-	"github.com/block/schemabot/pkg/cmd/templates"
+	"github.com/block/schemabot/pkg/cmd/internal/templates"
 )
 
 // LogsCmd views apply logs for a database or specific apply.

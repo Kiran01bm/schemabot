@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/block/schemabot/pkg/cmd/templates"
+	"github.com/block/schemabot/pkg/cmd/internal/templates"
 	webhooktemplates "github.com/block/schemabot/pkg/webhook/templates"
 )
 

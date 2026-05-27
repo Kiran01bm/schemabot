@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/block/schemabot/pkg/cmd/client"
-	"github.com/block/schemabot/pkg/cmd/templates"
+	"github.com/block/schemabot/pkg/cmd/internal/templates"
 	"github.com/block/schemabot/pkg/state"
 )
 

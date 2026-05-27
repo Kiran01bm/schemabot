@@ -3,7 +3,7 @@ package commands
 import (
 	"fmt"
 
-	"github.com/block/schemabot/pkg/cmd/templates"
+	"github.com/block/schemabot/pkg/cmd/internal/templates"
 )
 
 // previewExitContext dispatches exit context preview types.
