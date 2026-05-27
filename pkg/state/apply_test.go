@@ -193,6 +193,12 @@ func TestIsTerminalApplyState(t *testing.T) {
 	for _, s := range nonTerminalStates {
 		assert.False(t, IsTerminalApplyState(s), "%s should NOT be terminal", s)
 	}
+
+	// Accepts proto and uppercase forms, matching IsBranchSetupPhase/IsState.
+	assert.True(t, IsTerminalApplyState("STATE_COMPLETED"))
+	assert.True(t, IsTerminalApplyState("COMPLETED"))
+	assert.True(t, IsTerminalApplyState("STATE_REVERTED"))
+	assert.False(t, IsTerminalApplyState("STATE_RUNNING"))
 }
 
 func TestNormalizeState(t *testing.T) {

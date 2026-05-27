@@ -174,8 +174,10 @@ func IsState(s string, expected ...string) bool {
 // IsTerminalApplyState returns true if the state is a terminal state
 // where no further processing will occur. FailedRetryable is not terminal;
 // scheduler workers may claim and retry it.
+// Accepts any format (proto "STATE_COMPLETED", uppercase "COMPLETED", or
+// canonical lowercase "completed") — normalizes first.
 func IsTerminalApplyState(s string) bool {
-	info, ok := LookupApply(s)
+	info, ok := LookupApply(NormalizeState(s))
 	return ok && info.Terminal
 }
 

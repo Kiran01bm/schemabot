@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestStateLabel_PlanetScalePhases(t *testing.T) {
+func TestLabel_PlanetScalePhases(t *testing.T) {
 	assert.Equal(t, "Preparing branch", state.Label(state.Apply.PreparingBranch))
 	assert.Equal(t, "Applying changes to branch", state.Label(state.Apply.ApplyingBranchChanges))
 	assert.Equal(t, "Validating branch", state.Label(state.Apply.ValidatingBranch))
