@@ -929,7 +929,7 @@ func (c *LocalClient) Progress(ctx context.Context, req *ternv1.ProgressRequest)
 	// real progress (e.g., engine returns "running" during setup).
 	if applyRec, err := c.storage.Applies().Get(ctx, activeTask.ApplyID); err == nil && applyRec != nil {
 		switch {
-		case state.IsBranchSetupPhase(applyRec.State):
+		case state.IsSetupPhase(applyRec.State):
 			c.logger.Debug("Progress: overriding task-derived state with apply record setup phase",
 				"task_derived", overallState, "apply_record", applyRec.State)
 			overallState = applyRec.State

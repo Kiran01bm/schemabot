@@ -121,7 +121,7 @@ func (m WatchModel) progressView() string {
 	}
 
 	// Show table progress once past branch setup phases.
-	if !state.IsBranchSetupPhase(m.state) {
+	if !state.IsSetupPhase(m.state) {
 		m.renderTables(&b, tables)
 	}
 
@@ -220,7 +220,7 @@ func (m WatchModel) progressView() string {
 			b.WriteString(m.formatFooter())
 		}
 		b.WriteString("\n")
-	case state.IsBranchSetupPhase(m.state):
+	case state.IsSetupPhase(m.state):
 		b.WriteString("\n\n")
 		dimStyle := lipgloss.NewStyle().Faint(true)
 		b.WriteString(dimStyle.Render("ESC to detach"))

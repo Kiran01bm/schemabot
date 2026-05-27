@@ -194,7 +194,7 @@ func TestIsTerminalApplyState(t *testing.T) {
 		assert.False(t, IsTerminalApplyState(s), "%s should NOT be terminal", s)
 	}
 
-	// Accepts proto and uppercase forms, matching IsBranchSetupPhase/IsState.
+	// Accepts proto and uppercase forms, matching IsSetupPhase/IsState.
 	assert.True(t, IsTerminalApplyState("STATE_COMPLETED"))
 	assert.True(t, IsTerminalApplyState("COMPLETED"))
 	assert.True(t, IsTerminalApplyState("STATE_REVERTED"))
@@ -270,7 +270,7 @@ func TestDeriveApplyState_Scenario_UserCancellation(t *testing.T) {
 	assert.Equal(t, Apply.Stopped, DeriveApplyState(states))
 }
 
-func TestIsBranchSetupPhase(t *testing.T) {
+func TestIsSetupPhase(t *testing.T) {
 	setupPhases := []string{
 		Apply.Pending,
 		Apply.PreparingBranch,
@@ -280,7 +280,7 @@ func TestIsBranchSetupPhase(t *testing.T) {
 		Apply.ValidatingDeployRequest,
 	}
 	for _, s := range setupPhases {
-		assert.True(t, IsBranchSetupPhase(s), "%s should be a setup phase", s)
+		assert.True(t, IsSetupPhase(s), "%s should be a setup phase", s)
 	}
 
 	nonSetupPhases := []string{
@@ -293,7 +293,7 @@ func TestIsBranchSetupPhase(t *testing.T) {
 		Apply.Stopped,
 	}
 	for _, s := range nonSetupPhases {
-		assert.False(t, IsBranchSetupPhase(s), "%s should NOT be a setup phase", s)
+		assert.False(t, IsSetupPhase(s), "%s should NOT be a setup phase", s)
 	}
 }
 

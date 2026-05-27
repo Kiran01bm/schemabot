@@ -154,7 +154,7 @@ func WriteProgress(data ProgressData) {
 
 	// Table progress (sorted: active first, sharded before unsharded, terminal last)
 	// Hide tables during branch setup phases (all tables are Queued, not meaningful)
-	if len(activeTables) > 0 && !state.IsBranchSetupPhase(data.State) {
+	if len(activeTables) > 0 && !state.IsSetupPhase(data.State) {
 		sort.SliceStable(activeTables, func(i, j int) bool {
 			pi := ui.TableStatePriority(state.NormalizeTaskStatus(activeTables[i].Status))
 			pj := ui.TableStatePriority(state.NormalizeTaskStatus(activeTables[j].Status))

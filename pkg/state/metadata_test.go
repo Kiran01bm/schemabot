@@ -11,7 +11,7 @@ import (
 // TestApplyMetadata_CoversAllStates enforces that every canonical Apply.*
 // constant has an entry in the registry. Renderers and gating predicates rely
 // on the registry being exhaustive; a missing entry silently degrades to a
-// raw state string in the CLI and to "not terminal / not branch-setup" in
+// raw state string in the CLI and to "not terminal / not setup-phase" in
 // scheduling decisions.
 func TestApplyMetadata_CoversAllStates(t *testing.T) {
 	v := reflect.ValueOf(Apply)
@@ -43,10 +43,10 @@ func TestApplyMetadata_TerminalSet(t *testing.T) {
 	assert.False(t, applyMetadata[Apply.FailedRetryable].Terminal, "FailedRetryable must not be terminal")
 }
 
-// TestApplyMetadata_BranchSetupSet pins which states are classified as
-// PlanetScale branch-setup phases. CLI and TUI suppress the per-table list
-// during these states.
-func TestApplyMetadata_BranchSetupSet(t *testing.T) {
+// TestApplyMetadata_SetupPhaseSet pins which states are classified as
+// engine setup phases. CLI and TUI suppress the per-table list during these
+// states.
+func TestApplyMetadata_SetupPhaseSet(t *testing.T) {
 	expected := map[string]bool{
 		Apply.Pending:                 true,
 		Apply.PreparingBranch:         true,
@@ -57,7 +57,7 @@ func TestApplyMetadata_BranchSetupSet(t *testing.T) {
 		Apply.WaitingForDeploy:        true,
 	}
 	for s, info := range applyMetadata {
-		assert.Equalf(t, expected[s], info.BranchSetup, "BranchSetup classification for %q", s)
+		assert.Equalf(t, expected[s], info.SetupPhase, "SetupPhase classification for %q", s)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestLookupApply(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Completed", info.Label)
 	assert.True(t, info.Terminal)
-	assert.False(t, info.BranchSetup)
+	assert.False(t, info.SetupPhase)
 
 	_, ok = LookupApply("not_a_state")
 	assert.False(t, ok)

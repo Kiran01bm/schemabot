@@ -3,7 +3,7 @@ package state
 // ApplyStateInfo holds presentation-neutral metadata for a canonical Apply state.
 //
 // Renderers (CLI, TUI, PR comments) reach for Label when they need a short
-// human-readable name. Control-plane code reaches for Terminal and BranchSetup
+// human-readable name. Control-plane code reaches for Terminal and SetupPhase
 // to make scheduling and gating decisions. Centralizing this metadata avoids
 // the drift that occurs when each consumer maintains its own switch.
 //
@@ -20,12 +20,13 @@ type ApplyStateInfo struct {
 	// Stopped IS terminal at the apply level (operators must explicitly resume).
 	Terminal bool
 
-	// BranchSetup is true for PlanetScale branch-lifecycle phases where
-	// per-table progress is not yet meaningful (all tables are queued).
-	// Used by the CLI and TUI to suppress the table list during setup.
-	// Pending and WaitingForDeploy are included because the deploy hasn't
-	// started yet.
-	BranchSetup bool
+	// SetupPhase is true for engine-lifecycle phases that run before per-table
+	// work has meaningfully started (all tables are still queued). Used by
+	// the CLI and TUI to suppress the table list during setup. Engines that
+	// stage work before the per-table phase (e.g. PlanetScale's branch and
+	// deploy-request preparation) flag those states here; Pending and
+	// WaitingForDeploy are included because the deploy hasn't started yet.
+	SetupPhase bool
 }
 
 // applyMetadata is the registry of metadata for every canonical Apply state.
@@ -34,15 +35,15 @@ type ApplyStateInfo struct {
 // classification.
 var applyMetadata = map[string]ApplyStateInfo{
 	Apply.Pending: {
-		Label:       "Pending",
-		BranchSetup: true,
+		Label:      "Pending",
+		SetupPhase: true,
 	},
 	Apply.Running: {
 		Label: "Running",
 	},
 	Apply.WaitingForDeploy: {
-		Label:       "Waiting for deploy",
-		BranchSetup: true,
+		Label:      "Waiting for deploy",
+		SetupPhase: true,
 	},
 	Apply.WaitingForCutover: {
 		Label: "Waiting for cutover",
@@ -77,24 +78,24 @@ var applyMetadata = map[string]ApplyStateInfo{
 		Terminal: true,
 	},
 	Apply.PreparingBranch: {
-		Label:       "Preparing branch",
-		BranchSetup: true,
+		Label:      "Preparing branch",
+		SetupPhase: true,
 	},
 	Apply.ApplyingBranchChanges: {
-		Label:       "Applying changes to branch",
-		BranchSetup: true,
+		Label:      "Applying changes to branch",
+		SetupPhase: true,
 	},
 	Apply.ValidatingBranch: {
-		Label:       "Validating branch",
-		BranchSetup: true,
+		Label:      "Validating branch",
+		SetupPhase: true,
 	},
 	Apply.CreatingDeployRequest: {
-		Label:       "Creating deploy request",
-		BranchSetup: true,
+		Label:      "Creating deploy request",
+		SetupPhase: true,
 	},
 	Apply.ValidatingDeployRequest: {
-		Label:       "Validating deploy request",
-		BranchSetup: true,
+		Label:      "Validating deploy request",
+		SetupPhase: true,
 	},
 }
 
