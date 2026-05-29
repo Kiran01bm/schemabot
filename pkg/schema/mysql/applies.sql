@@ -26,6 +26,7 @@ CREATE TABLE `applies` (
   KEY `idx_lock_id` (`lock_id`),
   KEY `idx_plan_id` (`plan_id`),
   KEY `idx_database_env` (`database_name`,`database_type`,`environment`),
+  KEY `idx_database_env_deployment` (`database_name`,`database_type`,`environment`,`deployment`),
   KEY `idx_repo_pr` (`repository`,`pull_request`),
   KEY `idx_created_id` (`created_at`,`id`),
   KEY `idx_environment_created_id` (`environment`,`created_at`,`id`),
