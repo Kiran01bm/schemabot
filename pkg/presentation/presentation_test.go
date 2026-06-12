@@ -27,14 +27,14 @@ func TestDerive_Empty(t *testing.T) {
 	got := Derive(nil)
 	assert.Equal(t, state.Apply.Pending, got.State)
 	assert.Empty(t, got.Deployments)
-	assert.False(t, got.MultiDeployment)
+	assert.False(t, got.MultiDeployment())
 }
 
 // TestDerive_SingleDeployment: one operation is never flagged multi-deployment,
 // and the aggregate equals the single operation's state.
 func TestDerive_SingleDeployment(t *testing.T) {
 	got := Derive([]Operation{rolling("eu", so.Running)})
-	assert.False(t, got.MultiDeployment)
+	assert.False(t, got.MultiDeployment())
 	assert.Equal(t, state.Apply.Running, got.State)
 	require.Len(t, got.Deployments, 1)
 	assert.Equal(t, StateRunningCopy, got.Deployments[0].Presentation)
@@ -215,7 +215,7 @@ func TestDerive_AggregateBarrierWorkedExample(t *testing.T) {
 		barrier("ca", so.Pending),
 	})
 
-	assert.True(t, got.MultiDeployment)
+	assert.True(t, got.MultiDeployment())
 	assert.Equal(t, state.Apply.Running, got.State)
 	assert.Equal(t, "running", got.Label)
 

@@ -154,11 +154,15 @@ type Apply struct {
 	// Deployments are the per-deployment presentations in resolved deployment
 	// order (the order the caller supplies, which mirrors the rollout order).
 	Deployments []Deployment
+}
 
-	// MultiDeployment is true when the apply owns more than one deployment. The
-	// single-deployment case (false) should render exactly as today's UX with no
-	// deployment hierarchy; the model is still populated for callers that want it.
-	MultiDeployment bool
+// MultiDeployment reports whether the apply owns more than one deployment.
+// Callers use it as the single↔multi render threshold: when false, the apply
+// should render exactly as today's UX with no deployment hierarchy. It is
+// derived from the deployment count rather than stored, so it can never drift
+// from Deployments.
+func (a Apply) MultiDeployment() bool {
+	return len(a.Deployments) > 1
 }
 
 // Derive projects the ordered operations of one apply into its rollup. The input
@@ -177,12 +181,11 @@ func Derive(ops []Operation) Apply {
 
 	aggState := state.DeriveApplyState(rawStates)
 	return Apply{
-		State:           aggState,
-		Label:           aggregateLabel(aggState),
-		Counts:          summaryCounts(deployments),
-		NextAction:      nextAction(aggState, deployments),
-		Deployments:     deployments,
-		MultiDeployment: len(ops) > 1,
+		State:       aggState,
+		Label:       aggregateLabel(aggState),
+		Counts:      summaryCounts(deployments),
+		NextAction:  nextAction(aggState, deployments),
+		Deployments: deployments,
 	}
 }
 
