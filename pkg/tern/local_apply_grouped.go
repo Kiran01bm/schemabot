@@ -746,7 +746,7 @@ func (c *LocalClient) handleAtomicProgressTick(ctx context.Context, eng engine.E
 	if suppressParentApplyWrites(ctx) {
 		opState := state.DeriveApplyState(taskStates(tasks))
 		if releaseAtCutoverBarrier && state.IsState(opState, state.Apply.WaitingForCutover) {
-			c.logger.Info("operation parked at cutover barrier; exiting copy drive",
+			c.logger.Info("operation parked at cutover barrier; exiting operation drive",
 				"mode", groupedApplyMode(apply, options), "apply_id", apply.ApplyIdentifier, "operation_state", opState)
 			return true
 		}
