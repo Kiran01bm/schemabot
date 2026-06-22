@@ -1284,10 +1284,17 @@ CREATE TABLE orders (
 	applyID, ok := applyResp["apply_id"].(string)
 	require.True(t, ok && applyID != "", "apply response missing apply_id: %v", applyResp)
 
-	// Step 3: Poll progress until we see failed state
+	// Step 3: Poll progress until the MySQL error is surfaced in
+	// Progress.ErrorMessage. A Spirit DDL error is retryable by default, so the
+	// apply repeatedly cycles failed_retryable → running as the operator
+	// re-dispatches it, and reaches terminal failed only once the retry budget
+	// is exhausted. The error is surfaced whenever the apply is in a failure
+	// state, so poll on a bounded deadline until it appears rather than racing
+	// the narrow failed_retryable windows.
+	deadline := time.Now().Add(20 * time.Second)
 	var lastState string
 	var errorMessage string
-	for range 30 {
+	for time.Now().Before(deadline) {
 		progressHTTPReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/api/progress/apply/"+applyID, nil)
 		require.NoError(t, err, "create progress request")
 		resp, err := http.DefaultClient.Do(progressHTTPReq)
@@ -1301,24 +1308,23 @@ CREATE TABLE orders (
 		_ = resp.Body.Close()
 
 		lastState, _ = progressResp["state"].(string)
-		if msg, ok := progressResp["error_message"].(string); ok {
+		if msg, ok := progressResp["error_message"].(string); ok && msg != "" {
 			errorMessage = msg
 		}
 
 		t.Logf("Progress state: %s, error: %s", lastState, errorMessage)
 
-		if lastState == state.Apply.Failed {
+		if errorMessage != "" {
 			break
 		}
 		if lastState == state.Apply.Completed {
-			require.Fail(t, "expected failed but got completed")
+			require.Fail(t, "expected failure but got completed")
 		}
 
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// Verify we got failed state with error message
-	assert.Equal(t, state.Apply.Failed, lastState)
+	// Verify the MySQL error was surfaced in Progress.ErrorMessage.
 	assert.NotEmpty(t, errorMessage, "expected error_message to be set")
 	// MySQL error for FK to non-existent table should mention "users" or "referenced"
 	lowerErr := strings.ToLower(errorMessage)
